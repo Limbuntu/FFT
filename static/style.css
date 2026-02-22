@@ -1,0 +1,154 @@
+/* FFT custom styles */
+nav .active { font-weight: bold; text-decoration: underline; }
+nav ul:last-child { gap: 0.5rem; }
+nav ul:last-child li { padding: 0; }
+nav ul:last-child a { padding: 0.25rem 0.6rem; border-radius: 4px; font-size: 0.85rem; white-space: nowrap; }
+
+.breadcrumb { margin-bottom: 1rem; font-size: 0.9rem; }
+.breadcrumb a { margin: 0 0.15rem; }
+
+.file-actions { display: flex; align-items: center; gap: 1rem; margin-bottom: 0.5rem; }
+.file-actions button { margin: 0; padding: 0.3rem 0.8rem; font-size: 0.85rem; }
+
+table tbody tr:hover { background: rgba(255,255,255,0.04); }
+
+mark.ok { background: #2d6a4f; color: #fff; }
+mark.no { background: #6c757d; color: #fff; }
+
+/* ── Hardware grid tiles ── */
+.hw-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.6rem;
+    margin-top: 0.75rem;
+}
+
+.hw-tile {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 0.6rem 0.4rem;
+    border-radius: 8px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    text-align: center;
+    gap: 0.25rem;
+}
+
+.hw-tile.hw-available {
+    border-color: rgba(45,106,79,0.5);
+}
+
+.hw-tile-icon { font-size: 1.4rem; }
+.hw-tile-label { font-size: 0.8rem; font-weight: 600; }
+.hw-tile-name { font-size: 0.7rem; opacity: 0.7; }
+.hw-tile-status { font-size: 0.7rem; padding: 0.1rem 0.4rem; border-radius: 4px; }
+
+.task-card { margin-bottom: .4rem; padding: .3rem .5rem; font-size: .8rem; }
+.task-card header { display: flex; align-items: center; gap: .5rem; padding: .2rem 0; }
+.task-card progress { width: 100%; margin: .15rem 0; height: .4rem; }
+
+.status-running { color: #4dabf7; }
+.status-done { color: #51cf66; }
+.status-failed { color: #ff6b6b; }
+.status-cancelled { color: #868e96; }
+.status-pending { color: #ffd43b; }
+
+.small-btn { padding: 0.2rem 0.5rem; font-size: 0.75rem; margin: 0; }
+
+.bench-chart { margin-top: 1rem; }
+.bench-bar-wrap { display: flex; align-items: center; margin-bottom: 0.4rem; }
+.bench-label { width: 160px; font-size: 0.85rem; flex-shrink: 0; }
+.bench-bar {
+    background: linear-gradient(90deg, #4dabf7, #51cf66);
+    color: #fff; padding: 0.2rem 0.5rem; border-radius: 4px;
+    font-size: 0.8rem; min-width: 40px; text-align: right;
+    transition: width 0.5s ease;
+}
+
+section { min-height: 200px; }
+
+/* ── Two-column page layout ── */
+.page-layout {
+    display: flex;
+    gap: 1.5rem;
+    align-items: flex-start;
+    padding: 0 1.5rem;
+    height: calc(100vh - 5rem);
+}
+
+.panel-left {
+    flex: 3;
+    min-width: 0;
+    overflow-y: auto;
+    height: 100%;
+    padding-right: .5rem;
+}
+
+.panel-right {
+    flex: 2;
+    min-width: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    height: 100%;
+    padding-left: .5rem;
+    border-left: 1px solid rgba(255,255,255,0.08);
+}
+
+.panel-right table {
+    table-layout: fixed;
+    width: 100%;
+    word-break: break-all;
+}
+
+.panel-right code {
+    word-break: break-all;
+}
+
+@media (max-width: 900px) {
+    .page-layout {
+        flex-direction: column;
+        height: auto;
+    }
+    .panel-right {
+        border-left: none;
+        border-top: 1px solid rgba(255,255,255,0.08);
+        padding-left: 0;
+        padding-top: .75rem;
+    }
+}
+
+/* ── Folder cards ── */
+.folder-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+}
+
+.folder-card {
+    padding: 0.6rem 0.8rem;
+    margin: 0;
+}
+
+.folder-card header {
+    padding: 0;
+    margin: 0 0 0.2rem 0;
+}
+
+.folder-output-settings {
+    margin-top: 0.3rem;
+    padding-top: 0.3rem;
+    border-top: 1px solid rgba(255,255,255,0.08);
+}
+
+/* ── File table scroll ── */
+.file-table-wrap {
+    max-height: 50vh;
+    overflow-y: auto;
+}
+
+.folder-group-row {
+    background: rgba(255,255,255,0.02);
+}

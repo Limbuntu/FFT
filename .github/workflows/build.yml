@@ -1,0 +1,152 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ── Docker Image ──
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push CPU image
+        run: |
+          IMAGE=$REGISTRY/${IMAGE_NAME,,}
+          docker build -f Dockerfile -t $IMAGE:latest -t $IMAGE:cpu .
+          docker push $IMAGE:latest
+          docker push $IMAGE:cpu
+
+      - name: Build and push GPU image
+        run: |
+          IMAGE=$REGISTRY/${IMAGE_NAME,,}
+          docker build -f Dockerfile.gpu -t $IMAGE:gpu .
+          docker push $IMAGE:gpu
+
+  # ── Windows x64 ──
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build with PyInstaller
+        run: pyinstaller --clean --noconfirm fft.spec
+
+      - name: Download FFmpeg
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile ffmpeg-dl.zip
+          Expand-Archive -Path ffmpeg-dl.zip -DestinationPath ffmpeg-tmp
+          $ffmpeg = Get-ChildItem -Path ffmpeg-tmp -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
+          $ffprobe = Get-ChildItem -Path ffmpeg-tmp -Recurse -Filter "ffprobe.exe" | Select-Object -First 1
+          Copy-Item $ffmpeg.FullName -Destination "dist/FFT/ffmpeg.exe"
+          Copy-Item $ffprobe.FullName -Destination "dist/FFT/ffprobe.exe"
+
+      - name: Package lite
+        shell: pwsh
+        run: Compress-Archive -Path "dist/FFT/*" -DestinationPath "FFT-windows-x64-lite.zip"
+
+      - name: Package full
+        shell: pwsh
+        run: Compress-Archive -Path "dist/FFT/*" -DestinationPath "FFT-windows-x64-full.zip"
+
+      - name: Remove FFmpeg from lite
+        shell: pwsh
+        run: |
+          Remove-Item "FFT-windows-x64-lite.zip"
+          Remove-Item "dist/FFT/ffmpeg.exe", "dist/FFT/ffprobe.exe"
+          Compress-Archive -Path "dist/FFT/*" -DestinationPath "FFT-windows-x64-lite.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-builds
+          path: |
+            FFT-windows-x64-lite.zip
+            FFT-windows-x64-full.zip
+
+  # ── macOS arm64 ──
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build with PyInstaller
+        run: pyinstaller --clean --noconfirm fft.spec
+
+      - name: Bundle FFmpeg
+        run: |
+          brew install ffmpeg
+          cp $(which ffmpeg) dist/FFT/ffmpeg
+          cp $(which ffprobe) dist/FFT/ffprobe
+          chmod +x dist/FFT/ffmpeg dist/FFT/ffprobe
+
+      - name: Package lite
+        run: |
+          cd dist && tar czf ../FFT-macos-arm64-lite.tar.gz --exclude=ffmpeg --exclude=ffprobe FFT/
+
+      - name: Package full
+        run: |
+          cd dist && tar czf ../FFT-macos-arm64-full.tar.gz FFT/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-builds
+          path: |
+            FFT-macos-arm64-lite.tar.gz
+            FFT-macos-arm64-full.tar.gz
+
+  # ── Release (only on tags) ──
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/FFT-windows-x64-lite.zip
+            artifacts/FFT-windows-x64-full.zip
+            artifacts/FFT-macos-arm64-lite.tar.gz
+            artifacts/FFT-macos-arm64-full.tar.gz

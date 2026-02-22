@@ -1,0 +1,21 @@
+FROM docker.m.daocloud.io/nvidia/cuda:12.3.1-runtime-ubuntu22.04
+
+# 换成阿里云镜像源
+RUN sed -i 's|http://archive.ubuntu.com|http://mirrors.aliyun.com|g' /etc/apt/sources.list && \
+    sed -i 's|http://security.ubuntu.com|http://mirrors.aliyun.com|g' /etc/apt/sources.list
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends python3 python3-pip ffmpeg && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip3 install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ -r requirements.txt
+
+COPY app/ ./app/
+COPY static/ ./static/
+
+EXPOSE 8800
+
+CMD ["python3", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8800"]

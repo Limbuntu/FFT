@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FFT - FFmpeg Transcoder</title>
+    <link rel="stylesheet" href="/static/pico.min.css">
+    <link rel="stylesheet" href="/static/style.css?v=4">
+    <style>
+        .toast-container {
+            position: fixed; top: 1rem; right: 1rem; z-index: 9999;
+            display: flex; flex-direction: column; gap: .5rem; max-width: 400px;
+        }
+        .toast {
+            padding: .75rem 1rem; border-radius: 8px; color: #fff;
+            font-size: .9rem; box-shadow: 0 4px 12px rgba(0,0,0,.3);
+            animation: toast-in .3s ease;
+        }
+        .toast-info { background: #1e6bb8; }
+        .toast-success { background: #2d8a4e; }
+        .toast-error { background: #c0392b; }
+        @keyframes toast-in {
+            from { opacity: 0; transform: translateX(100%); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+        .bench-enc-tag {
+            display: inline-block; padding: .25rem .7rem; border-radius: 4px;
+            font-size: .85rem; cursor: pointer; user-select: none;
+            border: 1px solid var(--pico-muted-border-color, #888);
+            color: var(--pico-color, inherit);
+            background: transparent;
+            transition: background .15s, color .15s;
+        }
+        .bench-enc-tag:hover { opacity: .8; }
+        .bench-enc-active {
+            background: var(--pico-primary-background, #1e6bb8);
+            color: #fff;
+            border-color: var(--pico-primary-background, #1e6bb8);
+        }
+        .hw-tile.bench-enc-active {
+            outline: 2px solid var(--pico-primary, #1e6bb8);
+            outline-offset: -2px;
+            background: var(--pico-primary-focus, rgba(30,107,184,.15));
+        }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <!-- Toast notifications -->
+        <div class="toast-container">
+            <div v-for="t in toasts" :key="t.id" :class="'toast toast-' + t.type">
+                {{ t.message }}
+            </div>
+        </div>
+
+        <nav class="container-fluid">
+            <ul>
+                <li><strong>FFT</strong> <small>FFmpeg AV1 Transcoder</small></li>
+            </ul>
+            <ul>
+                <li><a href="#" :class="{active: rightTab === 'transcode'}" @click.prevent="rightTab = 'transcode'">转码</a></li>
+                <li><a href="#" :class="{active: rightTab === 'benchmark'}" @click.prevent="rightTab = 'benchmark'">跑分</a></li>
+                <li><a href="#" :class="{active: rightTab === 'presets'}" @click.prevent="rightTab = 'presets'">预设</a></li>
+            </ul>
+        </nav>
+
+        <div class="page-layout">
+            <!-- ════════ LEFT PANEL: Watch Folders + Files ════════ -->
+            <div class="panel-left">
+                <h4>监控文件夹</h4>
+
+                <!-- Add folder -->
+                <div style="display:flex;gap:.5rem;align-items:end;margin-bottom:.75rem">
+                    <label style="flex:1;margin:0">
+                        <input type="text" v-model="newFolderPath" placeholder="输入目录路径，或点击浏览选择" @keyup.enter="addWatchFolder" style="margin:0">
+                    </label>
+                    <button @click="addWatchFolder" :disabled="!newFolderPath" style="margin:0">添加</button>
+                    <button class="outline" @click="showBrowseDialog = true; browseTo('/')" style="margin:0">浏览</button>
+                    <button class="outline secondary" @click="rescanFolders" :aria-busy="wfLoading" style="margin:0">刷新</button>
+                </div>
+
+                <!-- Folder cards -->
+                <div v-if="watchFolders.length" class="folder-cards">
+                    <article v-for="wf in watchFolders" :key="wf.folder.path" class="folder-card">
+                        <header style="display:flex;justify-content:space-between;align-items:center">
+                            <span style="font-weight:600">{{ wf.folder.label || wf.folder.path }}</span>
+                            <button class="outline secondary small-btn" @click="removeWatchFolder(wf.folder.path)">删除</button>
+                        </header>
+                        <p style="margin:.25rem 0">
+                            <small><code>{{ wf.folder.path }}</code></small><br>
+                            <small>{{ wf.folder.file_count }} 个视频 | {{ formatSize(wf.folder.total_size) }}</small>
+                        </p>
+                        <!-- Per-folder output settings -->
+                        <div class="folder-output-settings">
+                            <select :value="wf.folder.output_dest" @change="updateFolderDest(wf.folder.path, $event.target.value)" style="margin:0;padding:.2rem .4rem;font-size:.8rem">
+                                <option value="beside">输出到源文件旁</option>
+                                <option value="subfolder">输出到 av1 子目录</option>
+                                <option value="custom">自定义目录</option>
+                            </select>
+                            <div v-if="wf.folder.output_dest === 'custom'" style="display:flex;gap:.3rem;margin-top:.3rem">
+                                <input type="text" :value="wf.folder.output_dir" @change="updateFolderDir(wf.folder.path, $event.target.value)" placeholder="输出目录" style="margin:0;padding:.2rem .4rem;font-size:.8rem">
+                                <button class="outline small-btn" @click="openFolderDirBrowser(wf.folder.path)" style="white-space:nowrap">浏览</button>
+                            </div>
+                        </div>
+                    </article>
+                </div>
+                <p v-if="!watchFolders.length && !wfLoading"><small>尚未添加监控文件夹</small></p>
+
+                <!-- File table -->
+                <div v-if="allWatchFiles.length" style="margin-top:.75rem">
+                    <div class="file-actions">
+                        <label style="margin:0">
+                            <input type="checkbox" :checked="allWatchFilesSelected" @change="toggleAllWatchFiles"> 全选
+                        </label>
+                        <span>已选 {{ selectedFiles.length }} / {{ allWatchFiles.length }}</span>
+                        <button @click="startTranscode" :disabled="selectedFiles.length === 0" style="margin-left:auto">
+                            开始转码 ({{ selectedFiles.length }})
+                        </button>
+                    </div>
+                    <div class="file-table-wrap">
+                        <table role="grid">
+                            <thead>
+                                <tr><th width="30"></th><th>文件名</th><th>文件夹</th><th>大小</th></tr>
+                            </thead>
+                            <tbody>
+                                <template v-for="wf in watchFolders" :key="wf.folder.path">
+                                    <tr v-if="wf.files.length" class="folder-group-row">
+                                        <td>
+                                            <input type="checkbox"
+                                                :checked="isFolderAllSelected(wf)"
+                                                @change="toggleFolderFiles(wf)">
+                                        </td>
+                                        <td colspan="3"><strong>{{ wf.folder.label || wf.folder.path }}</strong></td>
+                                    </tr>
+                                    <tr v-for="f in wf.files" :key="f.path" @click="toggleFile(f.path)" style="cursor:pointer">
+                                        <td>
+                                            <input type="checkbox"
+                                                :checked="selectedFiles.includes(f.path)"
+                                                @click.stop="toggleFile(f.path)">
+                                        </td>
+                                        <td>{{ f.name }}</td>
+                                        <td><small>{{ wf.folder.label }}</small></td>
+                                        <td>{{ formatSize(f.size) }}</td>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Browse dialog (watch folder) -->
+                <dialog :open="showBrowseDialog">
+                    <article style="min-width:min(90vw,600px)">
+                        <header>
+                            <button aria-label="Close" class="close" @click="showBrowseDialog = false"></button>
+                            选择目录
+                        </header>
+                        <div class="breadcrumb">
+                            <a href="#" @click.prevent="browseTo('/')">/</a>
+                            <span v-for="(seg, i) in pathSegments" :key="i">
+                                / <a href="#" @click.prevent="browseTo(seg.path)">{{ seg.name }}</a>
+                            </span>
+                        </div>
+                        <div style="max-height:50vh;overflow-y:auto">
+                            <table role="grid">
+                                <tbody>
+                                    <tr v-if="fileBrowser.parent" @click="goParent" style="cursor:pointer">
+                                        <td>📁</td><td>..</td>
+                                    </tr>
+                                    <tr v-for="f in fileBrowser.entries.filter(e => e.is_dir)" :key="f.path"
+                                        @click="browseTo(f.path)" style="cursor:pointer">
+                                        <td>📁</td><td>{{ f.name }}</td>
+                                    </tr>
+                                    <tr v-if="fileBrowser.entries.filter(e => e.is_dir).length === 0 && !fileBrowser.parent">
+                                        <td colspan="2">无子目录</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <footer>
+                            <small>当前: {{ fileBrowser.current }}</small>
+                            <button @click="selectBrowsedFolder">选择此目录</button>
+                        </footer>
+                    </article>
+                </dialog>
+
+                <!-- Browse dialog (per-folder output dir) -->
+                <dialog :open="showFolderDirDialog">
+                    <article style="min-width:min(90vw,600px)">
+                        <header>
+                            <button aria-label="Close" class="close" @click="showFolderDirDialog = false"></button>
+                            选择导出目录
+                        </header>
+                        <div class="breadcrumb">
+                            <a href="#" @click.prevent="browseFolderDir('/')">/</a>
+                            <span v-for="(seg, i) in folderDirSegments" :key="i">
+                                / <a href="#" @click.prevent="browseFolderDir(seg.path)">{{ seg.name }}</a>
+                            </span>
+                        </div>
+                        <div style="max-height:50vh;overflow-y:auto">
+                            <table role="grid">
+                                <tbody>
+                                    <tr v-if="folderDirBrowser.parent" @click="goFolderDirParent" style="cursor:pointer">
+                                        <td>📁</td><td>..</td>
+                                    </tr>
+                                    <tr v-for="f in folderDirBrowser.entries.filter(e => e.is_dir)" :key="f.path"
+                                        @click="browseFolderDir(f.path)" style="cursor:pointer">
+                                        <td>📁</td><td>{{ f.name }}</td>
+                                    </tr>
+                                    <tr v-if="folderDirBrowser.entries.filter(e => e.is_dir).length === 0 && !folderDirBrowser.parent">
+                                        <td colspan="2">无子目录</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <footer>
+                            <small>当前: {{ folderDirBrowser.current }}</small>
+                            <button @click="selectFolderDir">选择此目录</button>
+                        </footer>
+                    </article>
+                </dialog>
+            </div>
+
+            <!-- ════════ RIGHT PANEL: Settings + Tasks ════════ -->
+            <div class="panel-right">
+                <!-- Transcode -->
+                <div v-show="rightTab === 'transcode'">
+                    <h4>转码设置</h4>
+                    <div class="grid">
+                        <div>
+                            <label>编码器
+                                <select v-model="transcodeForm.encoder">
+                                    <option v-for="e in availableEncoders" :key="e.name" :value="e.name">{{ e.label }}</option>
+                                </select>
+                            </label>
+                        </div>
+                        <div>
+                            <label>预设
+                                <select v-model="selectedPreset" @change="applyPreset">
+                                    <option value="">自定义</option>
+                                    <option v-for="p in presets" :key="p.name" :value="p.name">{{ p.name }}</option>
+                                </select>
+                            </label>
+                        </div>
+                    </div>
+                    <label>CRF (质量): {{ transcodeForm.crf }}
+                        <input type="range" min="0" max="63" v-model.number="transcodeForm.crf">
+                    </label>
+                    <label>Preset (速度): {{ transcodeForm.preset }}
+                        <input type="range" min="0" max="13" v-model.number="transcodeForm.preset">
+                    </label>
+                    <div class="grid">
+                        <div>
+                            <label>输出后缀
+                                <input type="text" v-model="transcodeForm.suffix">
+                            </label>
+                        </div>
+                        <div>
+                            <label>输出格式
+                                <select v-model="transcodeForm.output_ext">
+                                    <option value="auto">自动 (保持原格式)</option>
+                                    <option value=".mkv">.mkv</option>
+                                    <option value=".mp4">.mp4</option>
+                                    <option value=".webm">.webm</option>
+                                </select>
+                            </label>
+                        </div>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:1rem;margin-bottom:1rem">
+                        <label style="margin:0;cursor:pointer">
+                            <input type="checkbox" v-model="autoTranscode" role="switch"> 新文件自动转码
+                        </label>
+                    </div>
+
+                    <!-- Task list -->
+                    <div v-if="tasks.length">
+                        <h5 style="display:flex;align-items:center;gap:.5rem">任务列表 <small v-if="totalEta" style="font-weight:normal;opacity:.8">{{ totalEta }}</small></h5>
+                        <article v-for="t in tasks" :key="t.task_id" class="task-card">
+                            <header>
+                                <span>{{ t.task_id }}</span>
+                                <span :class="'status-' + t.status">{{ t.status }}</span>
+                                <span v-if="t.eta" style="margin-left:auto;font-size:.75rem;opacity:.8">{{ t.eta }}</span>
+                                <button v-if="t.status==='running' || t.status==='pending'"
+                                        class="outline secondary small-btn" @click="cancelTask(t.task_id)">取消</button>
+                            </header>
+                            <p v-if="t.created_at" style="margin:0"><small>开始: {{ new Date(t.created_at).toLocaleString('zh-CN') }}</small></p>
+                            <p v-if="t.current_file" style="margin:0">
+                                <small><span v-if="t.total_files > 1">{{ (t.current_index || 0) + 1 }}/{{ t.total_files }} </span>当前: {{ t.current_file }}</small>
+                            </p>
+                            <p v-if="t.output_path" style="margin:0">
+                                <small>输出: {{ t.output_path }}</small>
+                            </p>
+                            <progress :value="t.progress" max="100"></progress>
+                            <small>{{ t.progress }}% {{ t.speed ? '| ' + t.speed : '' }} {{ t.message }}</small>
+                        </article>
+                    </div>
+                </div>
+
+                <!-- Benchmark -->
+                <div v-show="rightTab === 'benchmark'">
+                    <h4>跑分测试</h4>
+                    <div v-if="sysInfo" style="font-size:.85rem;margin-bottom:1rem;padding:.6rem .8rem;border-radius:6px;background:var(--pico-card-background-color,#1a1a2e);border:1px solid var(--pico-muted-border-color,#333)">
+                        <div><strong>CPU:</strong> {{ sysInfo.cpu }} ({{ sysInfo.cores }}核 / {{ sysInfo.threads }}线程)</div>
+                        <div><strong>GPU:</strong> {{ sysInfo.gpu }}</div>
+                        <div><strong>内存:</strong> {{ sysInfo.memory }} &nbsp; <strong>系统:</strong> {{ sysInfo.os }}</div>
+                    </div>
+
+                    <!-- Sub-tab toggle -->
+                    <div style="display:flex;gap:.5rem;margin-bottom:1rem">
+                        <span @click="benchView = 'leaderboard'" :class="{'bench-enc-active': benchView === 'leaderboard'}" class="bench-enc-tag">排行榜</span>
+                        <span @click="benchView = 'test'" :class="{'bench-enc-active': benchView === 'test'}" class="bench-enc-tag">跑分测试</span>
+                        <span v-if="benchHistory && benchHistory.results.length" @click="benchView = 'history'" :class="{'bench-enc-active': benchView === 'history'}" class="bench-enc-tag">我的记录</span>
+                    </div>
+
+                    <!-- Leaderboard view -->
+                    <div v-if="benchView === 'leaderboard'">
+                        <div style="display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:1rem">
+                            <span @click="lbEncoder = ''" :class="{'bench-enc-active': lbEncoder === ''}" class="bench-enc-tag">全部</span>
+                            <span v-for="enc in lbEncoderList" :key="enc"
+                                  @click="lbEncoder = enc"
+                                  :class="{'bench-enc-active': lbEncoder === enc}"
+                                  class="bench-enc-tag">{{ enc }}</span>
+                        </div>
+                        <div v-for="group in filteredLeaderboard" :key="group.encoder" style="margin-bottom:1.5rem">
+                            <h5 style="margin-bottom:.5rem">{{ group.encoder }}</h5>
+                            <div style="display:flex;flex-direction:column;gap:.4rem">
+                                <div v-for="(r, i) in group.items" :key="i"
+                                     :style="r.isMe ? 'border-left:3px solid var(--pico-primary,#1e6bb8);padding-left:.5rem' : 'padding-left:calc(3px + .5rem)'"
+                                     style="display:flex;align-items:center;gap:.6rem">
+                                    <div style="width:160px;flex-shrink:0;overflow:hidden">
+                                        <div v-if="r.isMe" style="font-size:.85rem;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" :title="r.note + ' / ' + r.chip">{{ r.note }}<br><small style="opacity:.6">{{ r.chip }}</small></div>
+                                        <div v-else style="font-size:.85rem;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" :title="r.chip + ' / ' + r.note">{{ r.chip }}<br><small style="opacity:.6">{{ r.note }}</small></div>
+                                    </div>
+                                    <div style="flex:1;position:relative;height:22px;background:var(--pico-muted-border-color,#e0e0e0);border-radius:4px;overflow:hidden">
+                                        <div :style="{width: (r.score / group.items[0].score * 100) + '%', background: r.isMe ? 'var(--pico-primary,#1e6bb8)' : 'var(--pico-primary-focus,rgba(30,107,184,.4))', height:'100%', borderRadius:'4px', transition:'width .3s'}"></div>
+                                        <span style="position:absolute;right:6px;top:50%;transform:translateY(-50%);font-size:.75rem;font-weight:600">{{ r.score }}</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <p v-if="!filteredLeaderboard.length"><small>暂无排行榜数据</small></p>
+                    </div>
+
+                    <!-- Test view -->
+                    <div v-if="benchView === 'test'">
+                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.5rem">
+                            <small>点击可用的编码器卡片选择跑分</small>
+                            <button class="outline small-btn" @click="detectHardware(true)" :aria-busy="hwLoading" style="margin:0">重新检测</button>
+                        </div>
+                        <p v-if="hardware.ffmpeg_version" style="margin:0 0 .5rem"><small>{{ hardware.ffmpeg_version }}</small></p>
+                        <div v-if="hardware.encoders.length" class="hw-grid" style="margin-bottom:1rem">
+                            <div v-for="e in hardware.encoders" :key="e.name" class="hw-tile"
+                                 :class="{'hw-available': e.available, 'bench-enc-active': benchEncoders.indexOf(e.name) >= 0}"
+                                 :style="e.available ? 'cursor:pointer' : 'opacity:.5;cursor:not-allowed'"
+                                 @click="e.available && toggleBenchEncoder(e.name)">
+                                <div class="hw-tile-icon">{{ hwIcon(e.hw_type) }}</div>
+                                <div class="hw-tile-label">{{ e.label }}</div>
+                                <code class="hw-tile-name">{{ e.name }}</code>
+                                <mark :class="e.available ? 'ok' : 'no'" class="hw-tile-status">
+                                    {{ e.available ? '✓ 可用' : '✗ 不可用' }}
+                                </mark>
+                                <div v-if="encoderScore(e.name)" style="margin-top:.3rem;font-size:.8rem;font-weight:600;color:var(--pico-primary,#1e6bb8)">
+                                    得分: {{ encoderScore(e.name) }}
+                                </div>
+                            </div>
+                        </div>
+                        <div style="display:flex;gap:.5rem;align-items:center">
+                            <button @click="runBenchmark" :aria-busy="benchLoading" :disabled="benchLoading" style="margin:0;width:auto">开始跑分</button>
+                            <button v-if="benchLoading" @click="cancelBenchmark" class="secondary" style="margin:0;width:auto">取消</button>
+                            <small v-if="benchEncoders.length" style="opacity:.7">已选 {{ benchEncoders.length }} 个编码器</small>
+                            <small v-else style="opacity:.7">未选择，将测试全部可用编码器</small>
+                        </div>
+                        <p v-if="benchLoading && benchResults.length === 0 && !benchRoundInfo"><small>正在进行跑分测试...</small></p>
+                        <p v-if="benchRoundInfo"><small>{{ benchRoundInfo }}</small></p>
+                        <table v-if="benchResults.length" style="margin-top:.5rem">
+                            <thead>
+                                <tr><th>编码器</th><th>FPS</th><th>耗时(s)</th><th>大小</th><th>得分</th><th>状态</th></tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="r in benchResults" :key="r.encoder">
+                                    <td>{{ r.label }}</td>
+                                    <td>{{ r.error ? '-' : r.fps }}</td>
+                                    <td>{{ r.elapsed }}</td>
+                                    <td>{{ r.error ? '-' : formatSize(r.output_size) }}</td>
+                                    <td><strong>{{ r.error ? '-' : r.score }}</strong></td>
+                                    <td>
+                                        <mark v-if="r.error" class="no" style="font-size:.8rem">{{ r.error }}</mark>
+                                        <mark v-else class="ok" style="font-size:.8rem">OK</mark>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                        <div v-if="benchResults.filter(r => !r.error).length" class="bench-chart">
+                            <div v-for="r in benchResults.filter(r => !r.error)" :key="r.encoder" class="bench-bar-wrap">
+                                <span class="bench-label">{{ r.label }}</span>
+                                <div class="bench-bar" :style="{width: barWidth(r.score) + '%'}">
+                                    {{ r.score }}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- History view -->
+                    <div v-if="benchView === 'history'">
+                        <div v-if="benchHistory && benchHistory.results.length">
+                            <table>
+                                <thead>
+                                    <tr><th>编码器</th><th>FPS</th><th>耗时(s)</th><th>大小</th><th>得分</th><th>状态</th></tr>
+                                </thead>
+                                <tbody>
+                                    <tr v-for="r in benchHistory.results" :key="r.encoder">
+                                        <td>{{ r.label }}</td>
+                                        <td>{{ r.error ? '-' : r.fps }}</td>
+                                        <td>{{ r.elapsed }}</td>
+                                        <td>{{ r.error ? '-' : formatSize(r.output_size) }}</td>
+                                        <td><strong>{{ r.error ? '-' : r.score }}</strong></td>
+                                        <td>
+                                            <mark v-if="r.error" class="no" style="font-size:.8rem">{{ r.error }}</mark>
+                                            <mark v-else class="ok" style="font-size:.8rem">OK</mark>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <p v-else><small>暂无跑分记录，请先进行跑分测试</small></p>
+                    </div>
+                </div>
+                <!-- Presets -->
+                <div v-show="rightTab === 'presets'">
+                    <h4>预设管理</h4>
+                    <div v-for="p in presets" :key="p.name" style="margin-bottom:.5rem;padding:.4rem .6rem;border-radius:6px;border:1px solid var(--pico-muted-border-color,#333);background:var(--pico-card-background-color,#1a1a2e)">
+                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.3rem">
+                            <div>
+                                <strong style="font-size:.9rem">{{ p.name }}</strong>
+                                <small v-if="p.builtin" style="margin-left:.3rem;opacity:.6">内置</small>
+                            </div>
+                            <div style="display:flex;gap:.3rem">
+                                <button class="outline small-btn" @click="startEditPreset(p)" v-if="editingPreset !== p.name">编辑</button>
+                                <button class="outline secondary small-btn" @click="deletePreset(p.name)" v-if="!p.builtin && editingPreset !== p.name">删除</button>
+                                <button class="outline secondary small-btn" @click="resetPreset(p.name)" v-if="p.builtin && editingPreset !== p.name">重置</button>
+                            </div>
+                        </div>
+                        <div v-if="editingPreset !== p.name">
+                            <div style="font-size:.78rem;opacity:.7;margin-bottom:.2rem">编码器: {{ p.encoder }} | CRF: {{ p.crf }} | Preset: {{ p.preset }}</div>
+                            <code style="font-size:.7rem;word-break:break-all;display:block;padding:.3rem .4rem;background:var(--pico-muted-border-color,#222);border-radius:4px;line-height:1.4">{{ presetCmd(p) }}</code>
+                        </div>
+                        <div v-else style="margin-top:.3rem">
+                            <div class="grid">
+                                <label style="margin:0">编码器 <select v-model="editPresetData.encoder" style="margin:0;padding:.2rem .4rem;font-size:.85rem"><option v-for="e in availableEncoders" :key="e.name" :value="e.name">{{ e.label }}</option></select></label>
+                                <label style="margin:0">CRF <input type="number" v-model.number="editPresetData.crf" style="margin:0;padding:.2rem .4rem;font-size:.85rem"></label>
+                                <label style="margin:0">Preset <input type="number" v-model.number="editPresetData.preset" style="margin:0;padding:.2rem .4rem;font-size:.85rem"></label>
+                            </div>
+                            <label style="margin:.3rem 0 0">额外参数 <input type="text" v-model="editPresetData.extra_args" placeholder="-svtav1-params lossless=1" style="margin:0;padding:.2rem .4rem;font-size:.85rem"></label>
+                            <div style="display:flex;gap:.3rem;margin-top:.4rem">
+                                <button class="small-btn" @click="saveEditPreset(p)">保存</button>
+                                <button class="outline secondary small-btn" @click="cancelEditPreset">取消</button>
+                            </div>
+                        </div>
+                    </div>
+                    <details>
+                        <summary>新建预设</summary>
+                        <div class="grid">
+                            <label>名称 <input type="text" v-model="newPreset.name"></label>
+                            <label>编码器 <select v-model="newPreset.encoder"><option v-for="e in availableEncoders" :key="e.name" :value="e.name">{{ e.label }}</option></select></label>
+                        </div>
+                        <div class="grid">
+                            <label>CRF <input type="number" v-model.number="newPreset.crf"></label>
+                            <label>Preset <input type="number" v-model.number="newPreset.preset"></label>
+                        </div>
+                        <button @click="savePreset">保存预设</button>
+                    </details>
+                </div>
+            </div>
+        </div>
+        <footer style="text-align:center;padding:.5rem 0;font-size:.7rem;opacity:.5">
+            FFT v1.0.0 · Built 2026-02-23 · <a href="https://github.com/Limbuntu/FFT" target="_blank" style="color:inherit">github.com/Limbuntu/FFT</a>
+        </footer>
+    </div>
+
+    <script src="/static/vue.global.prod.js"></script>
+    <script src="/static/app.js?v=16"></script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+.DS_Store
+.idea/
+.venv/
+__pycache__/
+*.pyc
+
+# Runtime data (user-specific)
+bench_history.json
+presets.json
+watchfolders.json
+data/
+
+# Build artifacts
+build/
+dist/
+release/
+.venv-build/
