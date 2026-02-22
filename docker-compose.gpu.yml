@@ -1,0 +1,11 @@
+# GPU version: docker compose -f docker-compose.yml -f docker-compose.gpu.yml up
+services:
+  fft:
+    image: ghcr.io/limbuntu/fft:gpu
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

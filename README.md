@@ -25,10 +25,34 @@
 docker run -d -p 8166:8166 -v ./videos:/videos ghcr.io/limbuntu/fft:latest
 ```
 
+或使用 Docker Compose：
+
+```yaml
+# docker-compose.yml
+services:
+  fft:
+    image: ghcr.io/limbuntu/fft:latest
+    ports:
+      - "8166:8166"
+    volumes:
+      - ./videos:/videos
+    restart: unless-stopped
+```
+
+```bash
+docker compose up -d
+```
+
 GPU 版本（需要 NVIDIA Docker Runtime）：
 
 ```bash
 docker run -d -p 8166:8166 --gpus all -v ./videos:/videos ghcr.io/limbuntu/fft:gpu
+```
+
+或使用 Docker Compose：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
 ```
 
 ### 桌面版

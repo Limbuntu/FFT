@@ -1,0 +1,8 @@
+services:
+  fft:
+    image: ghcr.io/limbuntu/fft:latest
+    ports:
+      - "8166:8166"
+    volumes:
+      - ./videos:/videos
+    restart: unless-stopped
