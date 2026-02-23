@@ -103,7 +103,7 @@ class Preset(BaseModel):
     preset: int | str = 8
     extra_args: list[str] = []
     builtin: bool = False
-    output_ext: str = ".mkv"
+    output_ext: str = "auto"
 
 
 # ── File browser ──────────────────────────────────────────────────────
