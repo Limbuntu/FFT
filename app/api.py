@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 import os
 from pathlib import Path
 
@@ -8,6 +9,8 @@ import json
 
 import platform
 import subprocess
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -319,13 +322,18 @@ async def cancel_benchmark():
 
 @router.get("/leaderboard")
 async def get_leaderboard():
-    from .paths import get_bundle_dir
-    lb_file = get_bundle_dir() / "bench_leaderboard.json"
-    try:
-        with open(lb_file, "r") as f:
-            return json.load(f)
-    except Exception:
-        return []
+    from .paths import get_bundle_dir, get_data_dir
+    # Try bundle dir first (packaged), then data dir (exe directory)
+    for base in [get_bundle_dir(), get_data_dir()]:
+        lb_file = base / "bench_leaderboard.json"
+        if lb_file.exists():
+            try:
+                with open(lb_file, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.warning("Failed to load leaderboard from %s: %s", lb_file, e)
+    logger.warning("bench_leaderboard.json not found in bundle or data dir")
+    return []
 
 
 # ── Presets ────────────────────────────────────────────────────────────
