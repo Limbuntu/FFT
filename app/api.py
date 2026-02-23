@@ -190,30 +190,33 @@ def _get_sysinfo() -> dict:
             cpu_name, _ = winreg.QueryValueEx(key, "ProcessorNameString")
             winreg.CloseKey(key)
             info["cpu"] = cpu_name.strip()
-            # Core/thread count
-            cores_phys = os.environ.get("NUMBER_OF_PROCESSORS", "")
+            # Core/thread count via PowerShell
             try:
-                wmic_out = subprocess.check_output(
-                    ["wmic", "cpu", "get", "NumberOfCores,NumberOfLogicalProcessors", "/value"],
-                    text=True, timeout=10
-                )
-                for line in wmic_out.splitlines():
-                    if line.startswith("NumberOfCores="):
-                        info["cores"] = int(line.split("=")[1])
-                    elif line.startswith("NumberOfLogicalProcessors="):
-                        info["threads"] = int(line.split("=")[1])
+                ps_cpu = subprocess.check_output(
+                    ["powershell", "-NoProfile", "-Command",
+                     "(Get-CimInstance Win32_Processor | Select-Object -First 1).NumberOfCores"],
+                    text=True, timeout=10, creationflags=0x08000000
+                ).strip()
+                if ps_cpu:
+                    info["cores"] = int(ps_cpu)
+                ps_threads = subprocess.check_output(
+                    ["powershell", "-NoProfile", "-Command",
+                     "(Get-CimInstance Win32_Processor | Select-Object -First 1).NumberOfLogicalProcessors"],
+                    text=True, timeout=10, creationflags=0x08000000
+                ).strip()
+                if ps_threads:
+                    info["threads"] = int(ps_threads)
             except Exception:
                 pass
-            # Memory
+            # Memory via PowerShell
             try:
-                wmic_mem = subprocess.check_output(
-                    ["wmic", "computersystem", "get", "TotalPhysicalMemory", "/value"],
-                    text=True, timeout=10
-                )
-                for line in wmic_mem.splitlines():
-                    if line.startswith("TotalPhysicalMemory="):
-                        mem_bytes = int(line.split("=")[1])
-                        info["memory"] = f"{round(mem_bytes / (1024**3), 1)} GB"
+                ps_mem = subprocess.check_output(
+                    ["powershell", "-NoProfile", "-Command",
+                     "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory"],
+                    text=True, timeout=10, creationflags=0x08000000
+                ).strip()
+                if ps_mem:
+                    info["memory"] = f"{round(int(ps_mem) / (1024**3), 1)} GB"
             except Exception:
                 pass
         elif system == "Linux":
@@ -256,13 +259,13 @@ def _get_sysinfo() -> dict:
                     break
         elif system == "Windows":
             try:
-                wmic_gpu = subprocess.check_output(
-                    ["wmic", "path", "win32_videocontroller", "get", "Name", "/value"],
-                    text=True, timeout=10
-                )
-                gpus = [l.split("=", 1)[1].strip() for l in wmic_gpu.splitlines() if l.startswith("Name=")]
-                if gpus:
-                    info["gpu"] = " / ".join(gpus)
+                ps_gpu = subprocess.check_output(
+                    ["powershell", "-NoProfile", "-Command",
+                     "(Get-CimInstance Win32_VideoController).Name -join ' / '"],
+                    text=True, timeout=10, creationflags=0x08000000
+                ).strip()
+                if ps_gpu:
+                    info["gpu"] = ps_gpu
             except Exception:
                 pass
         elif system == "Linux":

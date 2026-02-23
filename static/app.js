@@ -298,7 +298,7 @@ createApp({
             crf: 28,
             preset: 8,
             suffix: '_av1',
-            output_ext: '.mkv',
+            output_ext: 'auto',
         });
         const tasks = ref([]);
         const selectedPreset = ref(localStorage.getItem('fft_last_preset') || '');

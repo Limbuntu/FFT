@@ -61,8 +61,8 @@ jobs:
       - name: Download FFmpeg
         shell: pwsh
         run: |
-          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile ffmpeg-dl.zip
-          Expand-Archive -Path ffmpeg-dl.zip -DestinationPath ffmpeg-tmp
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full.7z" -OutFile ffmpeg-dl.7z
+          7z x ffmpeg-dl.7z -offmpeg-tmp
           $ffmpeg = Get-ChildItem -Path ffmpeg-tmp -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
           $ffprobe = Get-ChildItem -Path ffmpeg-tmp -Recurse -Filter "ffprobe.exe" | Select-Object -First 1
           Copy-Item $ffmpeg.FullName -Destination "dist/FFT/ffmpeg.exe"

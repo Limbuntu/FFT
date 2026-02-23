@@ -41,7 +41,7 @@ class TranscodeRequest(BaseModel):
     output_dir: str = ""
     output_dest: str = "beside"  # beside / subfolder / custom
     suffix: str = "_av1"
-    output_ext: str = ".mkv"  # .mkv / .mp4 / .webm / auto
+    output_ext: str = "auto"  # .mkv / .mp4 / .webm / auto
     # Per-file output overrides: filepath -> {output_dest, output_dir}
     file_outputs: dict[str, dict[str, str]] = {}
 

@@ -226,48 +226,40 @@
                 <!-- Transcode -->
                 <div v-show="rightTab === 'transcode'">
                     <h4>转码设置</h4>
-                    <div class="grid">
-                        <div>
-                            <label>编码器
-                                <select v-model="transcodeForm.encoder">
-                                    <option v-for="e in availableEncoders" :key="e.name" :value="e.name">{{ e.label }}</option>
-                                </select>
-                            </label>
-                        </div>
-                        <div>
-                            <label>预设
-                                <select v-model="selectedPreset" @change="applyPreset">
-                                    <option value="">自定义</option>
-                                    <option v-for="p in presets" :key="p.name" :value="p.name">{{ p.name }}</option>
-                                </select>
-                            </label>
-                        </div>
+                    <div class="grid" style="gap:.4rem">
+                        <label style="margin:0;font-size:.8rem">编码器
+                            <select v-model="transcodeForm.encoder" style="margin:0;padding:.2rem .4rem;font-size:.85rem">
+                                <option v-for="e in availableEncoders" :key="e.name" :value="e.name">{{ e.label }}</option>
+                            </select>
+                        </label>
+                        <label style="margin:0;font-size:.8rem">预设
+                            <select v-model="selectedPreset" @change="applyPreset" style="margin:0;padding:.2rem .4rem;font-size:.85rem">
+                                <option value="">自定义</option>
+                                <option v-for="p in presets" :key="p.name" :value="p.name">{{ p.name }}</option>
+                            </select>
+                        </label>
                     </div>
-                    <label>CRF (质量): {{ transcodeForm.crf }}
-                        <input type="range" min="0" max="63" v-model.number="transcodeForm.crf">
+                    <label style="margin:.4rem 0 0;font-size:.8rem">CRF (质量): {{ transcodeForm.crf }}
+                        <input type="range" min="0" max="63" v-model.number="transcodeForm.crf" style="margin:0;height:.4rem">
                     </label>
-                    <label>Preset (速度): {{ transcodeForm.preset }}
-                        <input type="range" min="0" max="13" v-model.number="transcodeForm.preset">
+                    <label style="margin:.4rem 0 0;font-size:.8rem">Preset (速度): {{ transcodeForm.preset }}
+                        <input type="range" min="0" max="13" v-model.number="transcodeForm.preset" style="margin:0;height:.4rem">
                     </label>
-                    <div class="grid">
-                        <div>
-                            <label>输出后缀
-                                <input type="text" v-model="transcodeForm.suffix">
-                            </label>
-                        </div>
-                        <div>
-                            <label>输出格式
-                                <select v-model="transcodeForm.output_ext">
-                                    <option value="auto">自动 (保持原格式)</option>
-                                    <option value=".mkv">.mkv</option>
-                                    <option value=".mp4">.mp4</option>
-                                    <option value=".webm">.webm</option>
-                                </select>
-                            </label>
-                        </div>
+                    <div class="grid" style="gap:.4rem;margin-top:.4rem">
+                        <label style="margin:0;font-size:.8rem">输出后缀
+                            <input type="text" v-model="transcodeForm.suffix" style="margin:0;padding:.2rem .4rem;font-size:.85rem">
+                        </label>
+                        <label style="margin:0;font-size:.8rem">输出格式
+                            <select v-model="transcodeForm.output_ext" style="margin:0;padding:.2rem .4rem;font-size:.85rem">
+                                <option value="auto">自动 (保持原格式)</option>
+                                <option value=".mkv">.mkv</option>
+                                <option value=".mp4">.mp4</option>
+                                <option value=".webm">.webm</option>
+                            </select>
+                        </label>
                     </div>
-                    <div style="display:flex;align-items:center;gap:1rem;margin-bottom:1rem">
-                        <label style="margin:0;cursor:pointer">
+                    <div style="display:flex;align-items:center;gap:1rem;margin:.4rem 0 .6rem">
+                        <label style="margin:0;cursor:pointer;font-size:.8rem">
                             <input type="checkbox" v-model="autoTranscode" role="switch"> 新文件自动转码
                         </label>
                     </div>
