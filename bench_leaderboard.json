@@ -1,8 +1,9 @@
 [
   {"chip": "NVIDIA RTX 4090", "encoder": "av1_nvenc", "score": 1, "note": "NVENC AV1"},
-  {"chip": "Intel Arc A770", "encoder": "av1_qsv", "score": 1, "note": "QSV AV1"},
-  {"chip": "Intel i9-14900K", "encoder": "libsvtav1", "score": 1, "note": "24核32线程"},
   {"chip": "Apple M4", "encoder": "libsvtav1", "score": 17562, "note": "10核 CPU"},
   {"chip": "Apple M4", "encoder": "libaom-av1", "score": 2388, "note": "10核 CPU"},
-  {"chip": "Apple M4", "encoder": "librav1e", "score": 181, "note": "10核 CPU"}
+  {"chip": "Apple M4", "encoder": "librav1e", "score": 181, "note": "10核 CPU"},
+  {"chip": "Intel Core Ultra7 165U", "encoder": "libaom-av1", "score": 428, "note": "12核14线程"},
+  {"chip": "Intel Core Ultra7 165U", "encoder": "av1_qsv", "score": 22848, "note": "Intel Arc 集显"},
+  {"chip": "Intel Core Ultra7 165U", "encoder": "libsvtav1", "score": 5837, "note": "12核14线程"}
 ]
