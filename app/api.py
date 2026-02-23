@@ -183,6 +183,39 @@ def _get_sysinfo() -> dict:
                 ["sysctl", "-n", "hw.memsize"], text=True, timeout=5
             ).strip()
             info["memory"] = f"{round(int(mem) / (1024**3), 1)} GB"
+        elif system == "Windows":
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                                r"HARDWARE\DESCRIPTION\System\CentralProcessor\0")
+            cpu_name, _ = winreg.QueryValueEx(key, "ProcessorNameString")
+            winreg.CloseKey(key)
+            info["cpu"] = cpu_name.strip()
+            # Core/thread count
+            cores_phys = os.environ.get("NUMBER_OF_PROCESSORS", "")
+            try:
+                wmic_out = subprocess.check_output(
+                    ["wmic", "cpu", "get", "NumberOfCores,NumberOfLogicalProcessors", "/value"],
+                    text=True, timeout=10
+                )
+                for line in wmic_out.splitlines():
+                    if line.startswith("NumberOfCores="):
+                        info["cores"] = int(line.split("=")[1])
+                    elif line.startswith("NumberOfLogicalProcessors="):
+                        info["threads"] = int(line.split("=")[1])
+            except Exception:
+                pass
+            # Memory
+            try:
+                wmic_mem = subprocess.check_output(
+                    ["wmic", "computersystem", "get", "TotalPhysicalMemory", "/value"],
+                    text=True, timeout=10
+                )
+                for line in wmic_mem.splitlines():
+                    if line.startswith("TotalPhysicalMemory="):
+                        mem_bytes = int(line.split("=")[1])
+                        info["memory"] = f"{round(mem_bytes / (1024**3), 1)} GB"
+            except Exception:
+                pass
         elif system == "Linux":
             with open("/proc/cpuinfo") as f:
                 phys_ids = set()
@@ -221,6 +254,17 @@ def _get_sysinfo() -> dict:
                 if line.startswith("Chipset Model:") or line.startswith("Chip Model:"):
                     info["gpu"] = line.split(":", 1)[1].strip()
                     break
+        elif system == "Windows":
+            try:
+                wmic_gpu = subprocess.check_output(
+                    ["wmic", "path", "win32_videocontroller", "get", "Name", "/value"],
+                    text=True, timeout=10
+                )
+                gpus = [l.split("=", 1)[1].strip() for l in wmic_gpu.splitlines() if l.startswith("Name=")]
+                if gpus:
+                    info["gpu"] = " / ".join(gpus)
+            except Exception:
+                pass
         elif system == "Linux":
             out = subprocess.check_output(
                 ["lspci"], text=True, timeout=5

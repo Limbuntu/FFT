@@ -57,8 +57,8 @@ async def _probe_encoder(encoder: str) -> bool:
     try:
         cmd = [
             "ffmpeg", "-hide_banner", "-y",
-            "-f", "lavfi", "-i", "nullsrc=s=64x64:d=0.1",
-            "-c:v", encoder, "-frames:v", "1",
+            "-f", "lavfi", "-i", "color=black:s=256x256:d=0.5:r=25",
+            "-c:v", encoder, "-frames:v", "5",
             "-f", "null", "-",
         ]
         proc = await asyncio.create_subprocess_exec(
@@ -66,9 +66,18 @@ async def _probe_encoder(encoder: str) -> bool:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
-        return proc.returncode == 0
-    except Exception:
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        if proc.returncode == 0:
+            return True
+        # Some encoders report success in stderr even with non-zero exit
+        err_text = stderr.decode(errors="replace").lower()
+        logger.debug("Probe %s rc=%d stderr=%s", encoder, proc.returncode, err_text[:200])
+        return False
+    except asyncio.TimeoutError:
+        logger.warning("Probe %s timed out", encoder)
+        return False
+    except Exception as e:
+        logger.warning("Probe %s failed: %s", encoder, e)
         return False
 
 
