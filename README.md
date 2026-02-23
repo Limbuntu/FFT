@@ -2,6 +2,8 @@
 
 基于 Web 的视频转码工具，专注 AV1 编码。支持硬件加速、批量转码、编码器跑分对比和监控文件夹自动转码。
 
+![FFT Screenshot](static/screenshot.png)
+
 ![Python](https://img.shields.io/badge/Python-3.12+-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-latest-green)
 ![Vue.js](https://img.shields.io/badge/Vue.js-3-brightgreen)
