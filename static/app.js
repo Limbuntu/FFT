@@ -422,6 +422,10 @@ createApp({
                 const msg = JSON.parse(evt.data);
 
                 // Benchmark messages
+                if (msg.type === 'toast') {
+                    showToast(msg.message, msg.level || 'info');
+                    return;
+                }
                 if (msg.type === 'bench_progress') {
                     benchRoundInfo.value = `${msg.encoder} 编码中 ${msg.progress}%` + (msg.speed ? ` (${msg.speed})` : '');
                     return;

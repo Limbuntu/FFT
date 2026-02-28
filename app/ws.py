@@ -37,6 +37,7 @@ async def broadcast(progress: TaskProgress) -> None:
         try:
             await ws.send_text(data)
         except Exception:
+            logger.debug("Failed to send to WebSocket client", exc_info=True)
             dead.append(ws)
     for ws in dead:
         _clients.discard(ws)
@@ -52,6 +53,7 @@ async def broadcast_json(obj: dict) -> None:
         try:
             await ws.send_text(data)
         except Exception:
+            logger.debug("Failed to send to WebSocket client", exc_info=True)
             dead.append(ws)
     for ws in dead:
         _clients.discard(ws)

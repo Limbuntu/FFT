@@ -18,6 +18,8 @@
 - **预设管理** — 内置多种预设（极速/均衡/高质量/无损），支持自定义
 - **实时反馈** — WebSocket 实时推送转码进度、速度、剩余时间
 - **自动转码** — 监控文件夹新增文件时自动开始转码
+- **日志系统** — 自动记录运行日志（含 ffmpeg 详细输出），支持一键下载，路径和文件名自动脱敏保护隐私
+- **格式兼容** — 自动检测不兼容 AV1 的容器格式（如 MOV），自动回退为 MP4 并提示
 
 ## 快速开始
 
@@ -68,6 +70,8 @@ docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
 
 macOS 版需要自行安装 FFmpeg：`brew install ffmpeg`
 
+> macOS 首次运行前需移除系统隔离属性：`xattr -rd com.apple.quarantine ~/Downloads/FFT/`
+
 解压后运行 `FFT`（macOS）或 `FFT.exe`（Windows），浏览器会自动打开。
 
 ### 从源码运行
@@ -93,6 +97,7 @@ FFT/
 │   ├── hardware.py     # 硬件检测
 │   ├── presets.py      # 预设管理
 │   ├── watchfolders.py # 监控文件夹
+│   ├── logging_config.py # 日志配置
 │   └── ws.py           # WebSocket 广播
 ├── static/             # 前端（Vue 3 + Pico CSS）
 ├── Dockerfile          # CPU Docker 镜像
@@ -118,6 +123,31 @@ FFT/
 ## Roadmap
 
 - [ ] 集成视频质量评估指标（VMAF / SSIM / PSNR），转码完成后自动进行画质对比分析
-- [ ] 任务列表增加详细日志输出，支持查看每个任务的完整 FFmpeg 执行日志
+- [x] 任务列表增加详细日志输出，支持查看每个任务的完整 FFmpeg 执行日志
 - [ ] 新增音频转码选项，支持独立配置音频编码器、码率、采样率等参数
 - [ ] 前端界面视觉重构，优化交互体验与整体布局设计
+
+## 转码效果示例
+
+以 iPhone 16 Pro 拍摄的 4K 60fps HDR 视频为例（HEVC → AV1，CRF 28，Preset 8）：
+
+| 项目         | IMG_2634.MOV (原始)                   | IMG_2634_av1.mp4 (转码后)             |
+|--------------|---------------------------------------|---------------------------------------|
+| 封装格式     | QuickTime MOV                         | MP4 (ISOM)                            |
+| 文件大小     | 44 MB                                 | 13 MB                                 |
+| 总码率       | 53.4 Mbps                             | 15.3 Mbps                             |
+| 视频编码     | H.265/HEVC (Main 10)                  | AV1 (Main, libsvtav1)                 |
+| 视频码率     | 52.7 Mbps                             | 15.1 Mbps                             |
+| 分辨率       | 3840x2160 (含旋转-90°)                | 2160x3840 (已旋转写入)                |
+| 帧率         | 60fps                                 | 60fps                                 |
+| 像素格式     | yuv420p10le (10bit)                   | yuv420p10le (10bit)                   |
+| 色彩空间     | BT.2020 / HLG                         | BT.2020 / HLG                         |
+| B帧          | 有 (has_b_frames=2)                   | 无 (has_b_frames=0)                   |
+| 音频编码     | AAC LC, 立体声, 48kHz                 | AAC LC, 立体声, 48kHz (一致)          |
+| 额外音轨     | 4声道 Apple Spatial Audio (apac)      | 无 (丢失)                             |
+| Dolby Vision | 有 (Profile 8, 兼容HLG)              | 无 (丢失)                             |
+| 元数据轨道   | 6条 (陀螺仪、GPS等)                   | 无 (丢失)                             |
+| 设备信息     | iPhone 16 Pro, iOS 26.3               | 无 (丢失)                             |
+
+> **注意：** AV1 转码后会丢失部分元数据，请根据需要提前自行修改 ffmpeg 预设
+

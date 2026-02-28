@@ -42,9 +42,9 @@ def load_history() -> dict | None:
         if os.path.exists(_HISTORY_FILE):
             with open(_HISTORY_FILE, "r") as f:
                 return json.load(f)
-    except Exception:
+    except Exception as e:
+        logger.warning("Failed to load benchmark history: %s", e)
         pass
-    return None
 
 
 def _save_history(results: list[BenchmarkResult]):
@@ -232,6 +232,8 @@ async def _bench_encoder_once(encoder: str, label: str) -> BenchmarkResult:
 
     cmd.append(outfile)
 
+    logger.info("Benchmark cmd: %s", " ".join(cmd))
+
     t0 = time.monotonic()
     proc = None
     try:
@@ -269,6 +271,7 @@ async def _bench_encoder_once(encoder: str, label: str) -> BenchmarkResult:
                     buf = buf[split_at + 1:]
 
                     text = line_bytes.decode("utf-8", errors="replace")
+                    logger.debug("[bench ffmpeg %s] %s", encoder, text.strip() if text.strip() else "(empty)")
                     time_match = re.search(r"time=(\d+:\d+:\d+\.\d+)", text)
                     speed_match = re.search(r"speed=\s*([\d.]+x)", text)
 

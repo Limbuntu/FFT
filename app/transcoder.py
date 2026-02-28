@@ -21,10 +21,18 @@ _durations: dict[str, float] = {}  # filepath -> duration in seconds
 ProgressCallback = Callable[[TaskProgress], Awaitable[None]]
 _progress_callback: ProgressCallback | None = None
 
+# Generic JSON broadcast callback (for toast messages etc.)
+_json_broadcast: Callable[[dict], Awaitable[None]] | None = None
+
 
 def set_progress_callback(cb: ProgressCallback) -> None:
     global _progress_callback
     _progress_callback = cb
+
+
+def set_json_broadcast(cb: Callable[[dict], Awaitable[None]]) -> None:
+    global _json_broadcast
+    _json_broadcast = cb
 
 
 def get_tasks() -> list[TaskInfo]:
@@ -66,7 +74,8 @@ async def _get_duration(filepath: str) -> float:
         )
         stdout, _ = await proc.communicate()
         return float(stdout.decode().strip())
-    except Exception:
+    except Exception as e:
+        logger.debug("Failed to get duration for %s: %s", filepath, e)
         return 0.0
 
 
@@ -132,10 +141,13 @@ async def cancel_task(task_id: str) -> bool:
         try:
             os.remove(partial)
             logger.info("Removed partial output: %s", partial)
-        except OSError:
-            pass
-    await _notify(task)
+        except OSError as e:
+            logger.warning("Failed to remove partial output %s: %s", partial, e)
     return True
+
+
+# Extensions that don't support AV1 codec
+_AV1_INCOMPATIBLE_EXTS = {".mov", ".avi", ".wmv", ".flv", ".ts", ".mpg", ".mpeg"}
 
 
 async def _run_task(task: TaskInfo) -> None:
@@ -152,6 +164,23 @@ async def _run_task(task: TaskInfo) -> None:
         # Build output path
         base, src_ext = os.path.splitext(filepath)
         ext = src_ext if task.request.output_ext == "auto" else task.request.output_ext
+
+        # AV1 is not supported in certain containers — fall back to .mp4
+        format_changed = False
+        if ext.lower() in _AV1_INCOMPATIBLE_EXTS:
+            logger.info("Container %s does not support AV1, falling back to .mp4 for %s", ext, filepath)
+            format_changed = True
+            original_ext = ext
+            ext = ".mp4"
+            if _json_broadcast:
+                try:
+                    await _json_broadcast({
+                        "type": "toast",
+                        "message": f"{os.path.basename(filepath)}: {original_ext} 不支持 AV1，已自动转为 .mp4",
+                        "level": "info",
+                    })
+                except Exception:
+                    pass
 
         # Per-file output override from folder settings
         fo = task.request.file_outputs.get(filepath, {})
@@ -177,6 +206,7 @@ async def _run_task(task: TaskInfo) -> None:
         duration = await _get_duration(filepath)
         _durations[filepath] = duration
         cmd = _build_ffmpeg_cmd(filepath, dst, task.request)
+        logger.info("Transcode cmd: %s", " ".join(cmd))
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -209,6 +239,8 @@ async def _run_task(task: TaskInfo) -> None:
                     text = line_bytes.decode("utf-8", errors="replace")
                     if not text.strip():
                         continue
+
+                    logger.debug("[ffmpeg] %s", text.strip())
 
                     time_match = re.search(r"time=(\d+:\d+:\d+\.\d+)", text)
                     speed_match = re.search(r"speed=\s*([\d.]+x)", text)
@@ -253,12 +285,15 @@ async def _run_task(task: TaskInfo) -> None:
                 return
 
             if proc.returncode != 0:
+                stderr_tail = buf.decode("utf-8", errors="replace")[-500:]
+                logger.error("Transcode failed for %s (rc=%d): %s", filepath, proc.returncode, stderr_tail)
                 task.status = TaskStatus.FAILED
                 task.message = f"ffmpeg exited with code {proc.returncode}"
                 await _notify(task)
                 return
 
         except Exception as e:
+            logger.error("Transcode failed for %s: %s", filepath, e, exc_info=True)
             task.status = TaskStatus.FAILED
             task.message = str(e)
             await _notify(task)

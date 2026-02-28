@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -9,10 +8,11 @@ from fastapi.responses import FileResponse
 
 from .api import router
 from .ws import ws_endpoint, broadcast, broadcast_json
-from .transcoder import set_progress_callback
+from .transcoder import set_progress_callback, set_json_broadcast
 from .benchmark import set_ws_broadcast
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+from .logging_config import setup_logging
+setup_logging()
 
 app = FastAPI(title="FFT - FFmpeg Transcoder", version="1.0.0")
 
@@ -24,6 +24,9 @@ async def startup():
 
 # Register progress callback
 set_progress_callback(broadcast)
+
+# Register JSON broadcast for transcoder toast messages
+set_json_broadcast(broadcast_json)
 
 # Register benchmark WebSocket broadcast
 set_ws_broadcast(broadcast_json)

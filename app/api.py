@@ -13,6 +13,7 @@ import subprocess
 logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse as FastFileResponse
 from pydantic import BaseModel
 
 from . import benchmark as bench_mod
@@ -247,6 +248,7 @@ def _get_sysinfo() -> dict:
                         info["memory"] = f"{round(kb / (1024**2), 1)} GB"
                         break
     except Exception:
+        logger.debug("Failed to parse sysinfo CPU/memory", exc_info=True)
         pass
     # GPU detection
     try:
@@ -280,6 +282,7 @@ def _get_sysinfo() -> dict:
                     info["gpu"] = line.split(":", 2)[-1].strip()
                     break
     except Exception:
+        logger.debug("Failed to detect GPU", exc_info=True)
         pass
     return info
 
@@ -362,3 +365,18 @@ async def reset_preset(name: str):
         raise HTTPException(404, "No override found")
     return {"status": "ok"}
     return {"status": "deleted"}
+
+
+# ── Logs ──────────────────────────────────────────────────────────────
+
+@router.get("/logs/download")
+async def download_logs():
+    from .logging_config import get_log_file
+    log_file = get_log_file()
+    if not log_file.exists():
+        raise HTTPException(404, "Log file not found")
+    return FastFileResponse(
+        str(log_file),
+        media_type="text/plain",
+        filename="fft.log",
+    )

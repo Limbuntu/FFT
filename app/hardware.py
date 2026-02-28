@@ -29,7 +29,8 @@ async def _ffmpeg_version() -> str:
         stdout, _ = await proc.communicate()
         first_line = stdout.decode().split("\n", 1)[0]
         return first_line.strip()
-    except Exception:
+    except Exception as e:
+        logger.debug("Failed to get ffmpeg version: %s", e)
         return ""
 
 
@@ -48,7 +49,8 @@ async def _list_encoders() -> set[str]:
             if m:
                 names.add(m.group(1))
         return names
-    except Exception:
+    except Exception as e:
+        logger.debug("Failed to list ffmpeg encoders: %s", e)
         return set()
 
 
