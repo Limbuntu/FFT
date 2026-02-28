@@ -110,9 +110,10 @@ jobs:
 
       - name: Codesign binaries
         run: |
-          find dist/FFT -type f \( -name '*.so' -o -name '*.dylib' -o -name 'Python' -o -name 'FFT' \) -exec codesign --force --sign - {} \;
-          find dist/FFT -type d -name '*.framework' | while read fw; do
-            codesign --force --sign - "$fw"
+          find dist/FFT -type f | while read f; do
+            if file "$f" | grep -q "Mach-O"; then
+              codesign --force --sign - "$f"
+            fi
           done
 
       - name: Package
