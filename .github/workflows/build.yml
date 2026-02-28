@@ -108,27 +108,21 @@ jobs:
       - name: Build with PyInstaller
         run: pyinstaller --clean --noconfirm fft.spec
 
-      - name: Bundle FFmpeg
+      - name: Codesign binaries
         run: |
-          brew install ffmpeg
-          cp $(which ffmpeg) dist/FFT/ffmpeg
-          cp $(which ffprobe) dist/FFT/ffprobe
-          chmod +x dist/FFT/ffmpeg dist/FFT/ffprobe
+          find dist/FFT -type f \( -name '*.so' -o -name '*.dylib' -o -name 'Python' -o -name 'FFT' \) -exec codesign --force --sign - {} \;
+          find dist/FFT -type d -name '*.framework' | while read fw; do
+            codesign --force --sign - "$fw"
+          done
 
-      - name: Package lite
+      - name: Package
         run: |
-          cd dist && tar czf ../FFT-macos-arm64-lite.tar.gz --exclude=ffmpeg --exclude=ffprobe FFT/
-
-      - name: Package full
-        run: |
-          cd dist && tar czf ../FFT-macos-arm64-full.tar.gz FFT/
+          cd dist && tar czf ../FFT-macos-arm64.tar.gz FFT/
 
       - uses: actions/upload-artifact@v4
         with:
           name: macos-builds
-          path: |
-            FFT-macos-arm64-lite.tar.gz
-            FFT-macos-arm64-full.tar.gz
+          path: FFT-macos-arm64.tar.gz
 
   # ── Release (only on tags) ──
   release:
@@ -148,5 +142,4 @@ jobs:
           files: |
             artifacts/FFT-windows-x64-lite.zip
             artifacts/FFT-windows-x64-full.zip
-            artifacts/FFT-macos-arm64-lite.tar.gz
-            artifacts/FFT-macos-arm64-full.tar.gz
+            artifacts/FFT-macos-arm64.tar.gz

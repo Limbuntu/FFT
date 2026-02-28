@@ -64,7 +64,9 @@ docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
 | 平台 | 完整版（含 FFmpeg） | 精简版（需自装 FFmpeg） |
 |------|---------------------|------------------------|
 | Windows x64 | `FFT-windows-x64-full.zip` | `FFT-windows-x64-lite.zip` |
-| macOS arm64 | `FFT-macos-arm64-full.tar.gz` | `FFT-macos-arm64-lite.tar.gz` |
+| macOS arm64 | — | `FFT-macos-arm64.tar.gz` |
+
+macOS 版需要自行安装 FFmpeg：`brew install ffmpeg`
 
 解压后运行 `FFT`（macOS）或 `FFT.exe`（Windows），浏览器会自动打开。
 
