@@ -59,6 +59,18 @@ docker run -d -p 8166:8166 --gpus all -v ./videos:/videos ghcr.io/limbuntu/fft:g
 docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
 ```
 
+Intel Arc GPU 版本（适用于 Intel Arc / 核显，需要宿主机已安装 Intel GPU 驱动）：
+
+```bash
+docker run -d -p 8166:8166 --device /dev/dri:/dev/dri -v ./videos:/videos ghcr.io/limbuntu/fft:intel
+```
+
+或使用 Docker Compose：
+
+```bash
+docker compose -f docker-compose.intel.yml up -d
+```
+
 ### 桌面版
 
 从 [Releases](https://github.com/Limbuntu/FFT/releases) 下载对应平台的压缩包：
@@ -101,7 +113,8 @@ FFT/
 │   └── ws.py           # WebSocket 广播
 ├── static/             # 前端（Vue 3 + Pico CSS）
 ├── Dockerfile          # CPU Docker 镜像
-├── Dockerfile.gpu      # GPU Docker 镜像
+├── Dockerfile.gpu      # NVIDIA GPU Docker 镜像
+├── Dockerfile.intel    # Intel Arc/核显 Docker 镜像
 ├── fft.spec            # PyInstaller 打包配置
 ├── run.py              # 桌面版启动入口
 └── requirements.txt    # Python 依赖

@@ -1,0 +1,35 @@
+FROM docker.m.daocloud.io/library/ubuntu:22.04
+
+# 阿里云镜像源
+RUN sed -i 's|http://archive.ubuntu.com|http://mirrors.aliyun.com|g' /etc/apt/sources.list && \
+    sed -i 's|http://security.ubuntu.com|http://mirrors.aliyun.com|g' /etc/apt/sources.list
+
+# Intel GPU 驱动 + VAAPI/QSV 运行时 + ffmpeg + Python
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates gpg-agent software-properties-common wget && \
+    wget -qO - https://repositories.intel.com/gpu/intel-graphics.key | \
+        gpg --dearmor -o /usr/share/keyrings/intel-graphics.gpg && \
+    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/intel-graphics.gpg] https://repositories.intel.com/gpu/ubuntu jammy unified" \
+        > /etc/apt/sources.list.d/intel-gpu.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        intel-opencl-icd intel-media-va-driver-non-free libmfx1 libvpl2 \
+        vainfo \
+        ffmpeg \
+        python3 python3-pip && \
+    apt-get purge -y gpg-agent software-properties-common wget && \
+    apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip3 install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ -r requirements.txt
+
+COPY app/ ./app/
+COPY static/ ./static/
+
+EXPOSE 8166
+
+CMD ["python3", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8166"]

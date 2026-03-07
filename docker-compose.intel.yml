@@ -1,0 +1,11 @@
+# Intel Arc GPU version: docker compose -f docker-compose.yml -f docker-compose.intel.yml up
+services:
+  fft:
+    image: ghcr.io/limbuntu/fft:intel
+    ports:
+      - "8166:8166"
+    volumes:
+      - ./videos:/videos
+    devices:
+      - /dev/dri:/dev/dri
+    restart: unless-stopped
