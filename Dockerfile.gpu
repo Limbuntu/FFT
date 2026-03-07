@@ -16,6 +16,6 @@ RUN pip3 install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ -r re
 COPY app/ ./app/
 COPY static/ ./static/
 
-EXPOSE 8800
+EXPOSE 8166
 
-CMD ["python3", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8800"]
+CMD ["python3", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8166"]
