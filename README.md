@@ -61,6 +61,8 @@ docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
 
 Intel Arc GPU 版本（适用于 Intel Arc / 核显，需要宿主机已安装 Intel GPU 驱动）：
 
+> **⚠️ 暂不支持飞牛OS。** 宿主机需要 Debian 13+ 或 Ubuntu 24.10+ 才能正确驱动 Intel Arc 系列显卡。
+
 ```bash
 docker run -d -p 8166:8166 --device /dev/dri:/dev/dri -v ./videos:/videos ghcr.io/limbuntu/fft:intel
 ```

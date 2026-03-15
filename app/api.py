@@ -280,11 +280,18 @@ def _get_sysinfo() -> dict:
                 out = subprocess.check_output(
                     ["lspci"], text=True, timeout=5
                 )
-                for line in out.splitlines():
-                    if "VGA" in line or "3D" in line or "Display" in line:
-                        info["gpu"] = line.split(":", 2)[-1].strip()
+                gpu_lines = [l for l in out.splitlines() if "VGA" in l or "3D" in l or "Display" in l]
+                # Prefer real GPU (Intel/NVIDIA/AMD) over virtual devices
+                for line in gpu_lines:
+                    desc = line.split(":", 2)[-1].strip()
+                    if any(k in desc for k in ("Intel", "NVIDIA", "AMD", "Arc", "GeForce", "Radeon")):
+                        info["gpu"] = desc
                         gpu_found = True
                         break
+                # Fallback to first VGA entry if no known vendor matched
+                if not gpu_found and gpu_lines:
+                    info["gpu"] = gpu_lines[0].split(":", 2)[-1].strip()
+                    gpu_found = True
             except Exception:
                 pass
             # Fallback: read /sys/bus/pci for GPU device names
