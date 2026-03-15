@@ -274,13 +274,50 @@ def _get_sysinfo() -> dict:
             except Exception:
                 pass
         elif system == "Linux":
-            out = subprocess.check_output(
-                ["lspci"], text=True, timeout=5
-            )
-            for line in out.splitlines():
-                if "VGA" in line or "3D" in line:
-                    info["gpu"] = line.split(":", 2)[-1].strip()
-                    break
+            gpu_found = False
+            # Try lspci first
+            try:
+                out = subprocess.check_output(
+                    ["lspci"], text=True, timeout=5
+                )
+                for line in out.splitlines():
+                    if "VGA" in line or "3D" in line or "Display" in line:
+                        info["gpu"] = line.split(":", 2)[-1].strip()
+                        gpu_found = True
+                        break
+            except Exception:
+                pass
+            # Fallback: read /sys/bus/pci for GPU device names
+            if not gpu_found:
+                try:
+                    import glob
+                    for cls_path in glob.glob("/sys/bus/pci/devices/*/class"):
+                        cls = open(cls_path).read().strip()
+                        # 0x030000 = VGA, 0x030200 = 3D controller, 0x038000 = Display
+                        if cls.startswith("0x0300") or cls.startswith("0x0302") or cls.startswith("0x0380"):
+                            dev_dir = os.path.dirname(cls_path)
+                            vendor_path = os.path.join(dev_dir, "vendor")
+                            device_path = os.path.join(dev_dir, "device")
+                            vendor = open(vendor_path).read().strip()
+                            device = open(device_path).read().strip()
+                            vendor_name = {"0x8086": "Intel", "0x10de": "NVIDIA", "0x1002": "AMD"}.get(vendor, vendor)
+                            info["gpu"] = f"{vendor_name} [{device}]"
+                            gpu_found = True
+                            break
+                except Exception:
+                    pass
+            # Fallback: try vainfo
+            if not gpu_found:
+                try:
+                    va_out = subprocess.check_output(
+                        ["vainfo"], text=True, timeout=5, stderr=subprocess.STDOUT
+                    )
+                    for line in va_out.splitlines():
+                        if "Driver version" in line:
+                            info["gpu"] = line.strip()
+                            break
+                except Exception:
+                    pass
     except Exception:
         logger.debug("Failed to detect GPU", exc_info=True)
         pass

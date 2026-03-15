@@ -23,6 +23,7 @@ RUN apt-get update && \
         intel-opencl-icd intel-media-va-driver-non-free libmfx1 libvpl2 \
         vainfo \
         jellyfin-ffmpeg7 \
+        pciutils \
         python3 python3-pip && \
     # jellyfin-ffmpeg 安装到 /usr/lib/jellyfin-ffmpeg/，创建软链接
     ln -sf /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/local/bin/ffmpeg && \
