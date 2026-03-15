@@ -40,6 +40,12 @@ jobs:
           docker build -f Dockerfile.gpu -t $IMAGE:gpu .
           docker push $IMAGE:gpu
 
+      - name: Build and push Intel GPU image
+        run: |
+          IMAGE=$REGISTRY/${IMAGE_NAME,,}
+          docker build -f Dockerfile.intel -t $IMAGE:intel .
+          docker push $IMAGE:intel
+
   # ── Windows x64 ──
   build-windows:
     runs-on: windows-latest
