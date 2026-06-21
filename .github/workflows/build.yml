@@ -14,7 +14,6 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  # ── Docker Image ──
   docker:
     runs-on: ubuntu-latest
     steps:
@@ -46,23 +45,33 @@ jobs:
           docker build -f Dockerfile.intel -t $IMAGE:intel .
           docker push $IMAGE:intel
 
-  # ── Windows x64 ──
   build-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-go@v5
         with:
-          python-version: '3.12'
+          go-version: '1.22.x'
 
-      - name: Install dependencies
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
         run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt pyinstaller
+          npm ci --prefix frontend
+          npm run build
 
-      - name: Build with PyInstaller
-        run: pyinstaller --clean --noconfirm fft.spec
+      - name: Build backend
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/FFT | Out-Null
+          go build -trimpath -ldflags="-s -w" -o dist/FFT/FFT.exe ./cmd/server
+          Copy-Item -Recurse frontend/dist dist/FFT/frontend/dist
+          Copy-Item bench_leaderboard.json dist/FFT/
 
       - name: Download FFmpeg
         shell: pwsh
@@ -74,18 +83,13 @@ jobs:
           Copy-Item $ffmpeg.FullName -Destination "dist/FFT/ffmpeg.exe"
           Copy-Item $ffprobe.FullName -Destination "dist/FFT/ffprobe.exe"
 
-      - name: Package lite
-        shell: pwsh
-        run: Compress-Archive -Path "dist/FFT/*" -DestinationPath "FFT-windows-x64-lite.zip"
-
       - name: Package full
         shell: pwsh
         run: Compress-Archive -Path "dist/FFT/*" -DestinationPath "FFT-windows-x64-full.zip"
 
-      - name: Remove FFmpeg from lite
+      - name: Package lite
         shell: pwsh
         run: |
-          Remove-Item "FFT-windows-x64-lite.zip"
           Remove-Item "dist/FFT/ffmpeg.exe", "dist/FFT/ffprobe.exe"
           Compress-Archive -Path "dist/FFT/*" -DestinationPath "FFT-windows-x64-lite.zip"
 
@@ -96,31 +100,35 @@ jobs:
             FFT-windows-x64-lite.zip
             FFT-windows-x64-full.zip
 
-  # ── macOS arm64 ──
   build-macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-go@v5
         with:
-          python-version: '3.12'
+          go-version: '1.22.x'
 
-      - name: Install dependencies
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
         run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt pyinstaller
+          npm ci --prefix frontend
+          npm run build
 
-      - name: Build with PyInstaller
-        run: pyinstaller --clean --noconfirm fft.spec
-
-      - name: Codesign binaries
+      - name: Build backend
         run: |
-          find dist/FFT -type f | while read f; do
-            if file "$f" | grep -q "Mach-O"; then
-              codesign --force --sign - "$f"
-            fi
-          done
+          mkdir -p dist/FFT/frontend
+          go build -trimpath -ldflags="-s -w -linkmode=external" -o dist/FFT/FFT ./cmd/server
+          cp -R frontend/dist dist/FFT/frontend/dist
+          cp bench_leaderboard.json dist/FFT/
+
+      - name: Codesign binary
+        run: codesign --force --sign - dist/FFT/FFT
 
       - name: Package
         run: |
@@ -131,7 +139,6 @@ jobs:
           name: macos-builds
           path: FFT-macos-arm64.tar.gz
 
-  # ── Release (only on tags) ──
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [build-windows, build-macos]

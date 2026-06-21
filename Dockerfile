@@ -1,22 +1,42 @@
-FROM docker.m.daocloud.io/library/python:3.12-slim
+FROM docker.m.daocloud.io/library/node:22-bookworm-slim AS frontend
+
+WORKDIR /src/frontend
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
+FROM docker.m.daocloud.io/library/golang:1.22-bookworm AS backend
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd/ ./cmd/
+COPY internal/ ./internal/
+COPY bench_leaderboard.json ./
+COPY --from=frontend /src/frontend/dist ./frontend/dist
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/fft ./cmd/server
+
+FROM docker.m.daocloud.io/library/debian:bookworm-slim
 
 WORKDIR /app
 
-# 换成阿里云镜像源
 RUN sed -i 's|http://deb.debian.org|http://mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
     sed -i 's|http://deb.debian.org|http://mirrors.aliyun.com|g' /etc/apt/sources.list 2>/dev/null
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg && \
+    apt-get install -y --no-install-recommends ca-certificates ffmpeg && \
     rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ -r requirements.txt
-
-COPY app/ ./app/
-COPY static/ ./static/
+COPY --from=backend /out/fft /usr/local/bin/fft
+COPY --from=frontend /src/frontend/dist ./frontend/dist
 COPY bench_leaderboard.json .
+
+ENV FFT_HOST=0.0.0.0 \
+    FFT_PORT=8166 \
+    FFT_DATA_DIR=/app/data \
+    FFT_STATIC_DIR=/app/frontend/dist
 
 EXPOSE 8166
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8166"]
+CMD ["fft"]

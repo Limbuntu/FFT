@@ -1,0 +1,41 @@
+name: Build Docker Image
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  REGISTRY: 192.168.123.128:3001
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        run: |
+          git clone http://gitea-token:${{ secrets.GITHUB_TOKEN }}@${GITHUB_SERVER_URL#http*://}/$GITHUB_REPOSITORY.git .
+          git checkout $GITHUB_SHA
+
+      - name: Login to Gitea Registry
+        run: |
+          echo "${{ secrets.REGISTRY_TOKEN }}" | docker login $REGISTRY -u $GITHUB_ACTOR --password-stdin
+
+      - name: Build and push CPU image
+        run: |
+          IMAGE=$REGISTRY/${GITHUB_REPOSITORY,,}
+          docker build -f Dockerfile -t $IMAGE:latest -t $IMAGE:cpu .
+          docker push $IMAGE:latest
+          docker push $IMAGE:cpu
+
+      - name: Build and push GPU image
+        run: |
+          IMAGE=$REGISTRY/${GITHUB_REPOSITORY,,}
+          docker build -f Dockerfile.gpu -t $IMAGE:gpu .
+          docker push $IMAGE:gpu
+
+      - name: Build and push Intel GPU image
+        run: |
+          IMAGE=$REGISTRY/${GITHUB_REPOSITORY,,}
+          docker build -f Dockerfile.intel -t $IMAGE:intel .
+          docker push $IMAGE:intel

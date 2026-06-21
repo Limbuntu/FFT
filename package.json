@@ -1,0 +1,10 @@
+{
+  "scripts": {
+    "dev": "npm --prefix frontend run dev",
+    "build": "npm --prefix frontend run build",
+    "preview": "npm --prefix frontend run preview",
+    "server": "PATH=\"$PWD/.tools/go/bin:$PATH\" GOPATH=\"$PWD/.cache/gopath\" GOCACHE=\"$PWD/.cache/go-build\" sh -c 'if [ \"$(uname -s)\" = \"Darwin\" ]; then GOFLAGS=\"-ldflags=-linkmode=external\" go run ./cmd/server; else go run ./cmd/server; fi'",
+    "test": "PATH=\"$PWD/.tools/go/bin:$PATH\" GOPATH=\"$PWD/.cache/gopath\" GOCACHE=\"$PWD/.cache/go-build\" go test ./..."
+  },
+  "devDependencies": {}
+}

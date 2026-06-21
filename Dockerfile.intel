@@ -1,19 +1,34 @@
+FROM docker.m.daocloud.io/library/node:22-bookworm-slim AS frontend
+
+WORKDIR /src/frontend
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
+FROM docker.m.daocloud.io/library/golang:1.22-bookworm AS backend
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd/ ./cmd/
+COPY internal/ ./internal/
+COPY bench_leaderboard.json ./
+COPY --from=frontend /src/frontend/dist ./frontend/dist
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/fft ./cmd/server
+
 FROM docker.m.daocloud.io/library/ubuntu:22.04
 
-# 阿里云镜像源
 RUN sed -i 's|http://archive.ubuntu.com|http://mirrors.aliyun.com|g' /etc/apt/sources.list && \
     sed -i 's|http://security.ubuntu.com|http://mirrors.aliyun.com|g' /etc/apt/sources.list
 
-# Intel GPU 驱动 + VAAPI/QSV 运行时 + jellyfin-ffmpeg (7.x, 支持 av1_qsv) + Python
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates gpg-agent software-properties-common wget curl && \
-    # Intel GPU 驱动仓库
     wget -qO - https://repositories.intel.com/gpu/intel-graphics.key | \
         gpg --dearmor -o /usr/share/keyrings/intel-graphics.gpg && \
     echo "deb [arch=amd64 signed-by=/usr/share/keyrings/intel-graphics.gpg] https://repositories.intel.com/gpu/ubuntu jammy unified" \
         > /etc/apt/sources.list.d/intel-gpu.list && \
-    # Jellyfin ffmpeg 仓库 (包含完整 QSV/VAAPI 支持的新版 ffmpeg)
     curl -fsSL https://repo.jellyfin.org/ubuntu/jellyfin_team.gpg.key | \
         gpg --dearmor -o /usr/share/keyrings/jellyfin.gpg && \
     echo "deb [arch=amd64 signed-by=/usr/share/keyrings/jellyfin.gpg] https://repo.jellyfin.org/ubuntu jammy main" \
@@ -21,11 +36,7 @@ RUN apt-get update && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
         intel-opencl-icd intel-media-va-driver-non-free libmfx1 libvpl2 \
-        vainfo \
-        jellyfin-ffmpeg7 \
-        pciutils \
-        python3 python3-pip && \
-    # jellyfin-ffmpeg 安装到 /usr/lib/jellyfin-ffmpeg/，创建软链接
+        vainfo jellyfin-ffmpeg7 pciutils && \
     ln -sf /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/local/bin/ffmpeg && \
     ln -sf /usr/lib/jellyfin-ffmpeg/ffprobe /usr/local/bin/ffprobe && \
     apt-get purge -y gpg-agent software-properties-common wget curl && \
@@ -33,13 +44,15 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+COPY --from=backend /out/fft /usr/local/bin/fft
+COPY --from=frontend /src/frontend/dist ./frontend/dist
+COPY bench_leaderboard.json .
 
-COPY requirements.txt .
-RUN pip3 install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ -r requirements.txt
-
-COPY app/ ./app/
-COPY static/ ./static/
+ENV FFT_HOST=0.0.0.0 \
+    FFT_PORT=8166 \
+    FFT_DATA_DIR=/app/data \
+    FFT_STATIC_DIR=/app/frontend/dist
 
 EXPOSE 8166
 
-CMD ["python3", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8166"]
+CMD ["fft"]
