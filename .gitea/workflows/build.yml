@@ -3,7 +3,8 @@ name: Build Docker Image
 on:
   push:
     branches:
-      - main
+      - go
+  workflow_dispatch:
 
 env:
   REGISTRY: 192.168.123.128:3001
