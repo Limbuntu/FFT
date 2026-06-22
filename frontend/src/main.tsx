@@ -7,6 +7,7 @@ import {
   ChevronLeft,
   Cpu,
   Download,
+  FileVideo,
   Folder,
   FolderOpen,
   Gauge,
@@ -137,6 +138,11 @@ type Toast = {
 
 const emptyBrowser: FileBrowser = { current: '/', parent: null, entries: [] };
 const defaultForm: TranscodeForm = { encoder: 'libsvtav1', crf: 28, preset: 8, suffix: '_av1', output_ext: 'auto' };
+const navItems: { id: Tab; label: string; description: string; icon: typeof Activity }[] = [
+  { id: 'transcode', label: '转码', description: '监控目录、选择文件并管理转码任务', icon: FileVideo },
+  { id: 'benchmark', label: '跑分', description: '测试编码器性能并查看本机记录', icon: BarChart3 },
+  { id: 'presets', label: '预设', description: '维护常用编码参数和输出格式', icon: Save },
+];
 
 function App() {
   const [tab, setTab] = useState<Tab>('transcode');
@@ -424,6 +430,7 @@ function App() {
   }, [benchHistory, lbEncoder, leaderboard, sysInfo]);
 
   const lbEncoders = useMemo(() => Array.from(new Set(leaderboard.map((row) => row.encoder))), [leaderboard]);
+  const activeNav = navItems.find((item) => item.id === tab) ?? navItems[0];
 
   return (
     <div className="min-h-screen bg-mist text-ink">
@@ -433,98 +440,123 @@ function App() {
         ))}
       </div>
 
-      <header className="border-b border-line bg-panel">
-        <div className="mx-auto flex max-w-[1800px] flex-wrap items-center justify-between gap-3 px-5 py-3">
-          <div className="flex items-center gap-3">
-            <div className="grid size-9 place-items-center rounded bg-ink text-white"><Activity size={19} /></div>
+      <div className="app-shell">
+        <aside className="app-sidebar">
+          <div className="sidebar-brand">
+            <div className="brand-mark"><Activity size={19} /></div>
             <div>
-              <h1 className="text-lg font-semibold leading-tight">FFT</h1>
-              <p className="text-xs text-slate-500">FFmpeg AV1 Transcoder</p>
+              <h1>FFT</h1>
+              <p>FFmpeg AV1 Transcoder</p>
             </div>
           </div>
-          <div className="segmented">
-            <button className={tab === 'transcode' ? 'active' : ''} onClick={() => setTab('transcode')}><Settings size={16} />转码</button>
-            <button className={tab === 'benchmark' ? 'active' : ''} onClick={() => setTab('benchmark')}><BarChart3 size={16} />跑分</button>
-            <button className={tab === 'presets' ? 'active' : ''} onClick={() => setTab('presets')}><Save size={16} />预设</button>
-          </div>
-        </div>
-      </header>
 
-      <main className="mx-auto grid max-w-[1800px] gap-4 px-5 py-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(420px,0.9fr)]">
-        <section className="panel min-h-[calc(100vh-7.5rem)]">
-          <div className="flex flex-wrap items-end gap-2 border-b border-line p-4">
-            <label className="field min-w-[260px] flex-1">
-              <span>监控文件夹</span>
-              <input value={newFolderPath} onChange={(event) => setNewFolderPath(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && void addWatchFolder()} placeholder="输入目录路径，或浏览选择" />
-            </label>
-            <button className="btn primary" onClick={() => void addWatchFolder()} disabled={!newFolderPath}><Plus size={16} />添加</button>
-            <button className="btn" onClick={() => { setBrowserMode('watch'); void browseTo('/'); }}><FolderOpen size={16} />浏览</button>
-            <button className="icon-btn" title="刷新" onClick={() => void loadWatchFolders(false)}>{wfLoading ? <Loader2 className="animate-spin" size={17} /> : <RefreshCw size={17} />}</button>
-          </div>
+          <nav className="sidebar-nav" aria-label="主导航">
+            <div className="sidebar-nav-label">导航</div>
+            {navItems.map((item) => {
+              const Icon = item.icon;
+              return (
+                <button key={item.id} className={`sidebar-nav-item ${tab === item.id ? 'active' : ''}`} aria-label={item.label} onClick={() => setTab(item.id)}>
+                  <Icon size={18} />
+                  <span>
+                    <strong>{item.label}</strong>
+                    <small>{item.description}</small>
+                  </span>
+                </button>
+              );
+            })}
+          </nav>
 
-          <div className="grid gap-3 p-4 lg:grid-cols-2">
-            {watchFolders.map((wf) => (
-              <div key={wf.folder.path} className="item-card">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2 font-semibold"><Folder size={17} />{wf.folder.label || wf.folder.path}</div>
-                    <div className="mt-1 truncate text-xs text-slate-500" title={wf.folder.path}>{wf.folder.path}</div>
-                    <div className="mt-1 text-xs text-slate-600">{wf.folder.file_count} 个视频 · {formatSize(wf.folder.total_size)}</div>
-                  </div>
-                  <button className="icon-btn danger" title="删除" onClick={() => void removeWatchFolder(wf.folder.path)}><Trash2 size={16} /></button>
-                </div>
-                <div className="mt-3 grid gap-2 sm:grid-cols-[180px_1fr_auto]">
-                  <select value={wf.folder.output_dest} onChange={(event) => void updateFolder(wf.folder.path, { output_dest: event.target.value })}>
-                    <option value="beside">源文件旁</option>
-                    <option value="subfolder">av1 子目录</option>
-                    <option value="custom">自定义目录</option>
-                  </select>
-                  <input value={wf.folder.output_dir || ''} disabled={wf.folder.output_dest !== 'custom'} onChange={(event) => void updateFolder(wf.folder.path, { output_dir: event.target.value })} placeholder="输出目录" />
-                  <button className="icon-btn" title="选择输出目录" disabled={wf.folder.output_dest !== 'custom'} onClick={() => { outputFolderRef.current = wf.folder.path; setBrowserMode('output'); void browseTo('/'); }}><FolderOpen size={16} /></button>
-                </div>
-              </div>
-            ))}
-            {!watchFolders.length && <div className="rounded border border-dashed border-line p-8 text-center text-sm text-slate-500">尚未添加监控文件夹</div>}
+          <div className="sidebar-footer">
+            <span>FFT v1.0.0</span>
+            <a className="sidebar-log-link" href="/api/logs/download"><Download size={13} />下载日志</a>
           </div>
+        </aside>
 
-          <div className="border-t border-line">
-            <div className="flex flex-wrap items-center gap-3 px-4 py-3">
-              <label className="inline-flex items-center gap-2 text-sm">
-                <input type="checkbox" checked={allSelected} onChange={() => setSelectedFiles(allSelected ? [] : allFiles.map((file) => file.path))} />
-                全选
-              </label>
-              <span className="text-sm text-slate-600">已选 {selectedFiles.length} / {allFiles.length}</span>
-              <button className="btn primary ml-auto" disabled={!selectedFiles.length} onClick={() => void startTranscodeFor(selectedFiles)}><Play size={16} />开始转码</button>
+        <div className="app-content">
+          <header className="app-topbar">
+            <div>
+              <h2>{activeNav.label}</h2>
+              <p>{activeNav.description}</p>
             </div>
-            <div className="max-h-[50vh] overflow-auto">
-              <table className="data-table">
-                <thead><tr><th></th><th>文件名</th><th>文件夹</th><th>大小</th></tr></thead>
-                <tbody>
+          </header>
+
+          <main className={`app-main ${tab === 'transcode' ? 'workspace-grid' : 'workspace-single'}`}>
+            {tab === 'transcode' && (
+              <section className="panel workspace-panel">
+                <div className="flex flex-wrap items-end gap-2 border-b border-line p-4">
+                  <label className="field min-w-[260px] flex-1">
+                    <span>监控文件夹</span>
+                    <input value={newFolderPath} onChange={(event) => setNewFolderPath(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && void addWatchFolder()} placeholder="输入目录路径，或浏览选择" />
+                  </label>
+                  <button className="btn primary" onClick={() => void addWatchFolder()} disabled={!newFolderPath}><Plus size={16} />添加</button>
+                  <button className="btn" onClick={() => { setBrowserMode('watch'); void browseTo('/'); }}><FolderOpen size={16} />浏览</button>
+                  <button className="icon-btn" title="刷新" onClick={() => void loadWatchFolders(false)}>{wfLoading ? <Loader2 className="animate-spin" size={17} /> : <RefreshCw size={17} />}</button>
+                </div>
+
+                <div className="grid gap-3 p-4 lg:grid-cols-2">
                   {watchFolders.map((wf) => (
-                    <React.Fragment key={wf.folder.path}>
-                      {wf.files.length > 0 && (
-                        <tr className="group-row">
-                          <td><input type="checkbox" checked={wf.files.every((file) => selectedSet.has(file.path))} onChange={() => toggleFolderSelection(wf, selectedSet, setSelectedFiles)} /></td>
-                          <td colSpan={3}>{wf.folder.label || wf.folder.path}</td>
-                        </tr>
-                      )}
-                      {wf.files.map((file) => (
-                        <tr key={file.path} onClick={() => toggleFile(file.path, setSelectedFiles)}>
-                          <td><input type="checkbox" checked={selectedSet.has(file.path)} onChange={() => toggleFile(file.path, setSelectedFiles)} onClick={(event) => event.stopPropagation()} /></td>
-                          <td className="font-medium">{file.name}</td>
-                          <td className="text-slate-500">{wf.folder.label || wf.folder.path}</td>
-                          <td>{formatSize(file.size)}</td>
-                        </tr>
-                      ))}
-                    </React.Fragment>
+                    <div key={wf.folder.path} className="item-card">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 font-semibold"><Folder size={17} />{wf.folder.label || wf.folder.path}</div>
+                          <div className="mt-1 truncate text-xs text-slate-500" title={wf.folder.path}>{wf.folder.path}</div>
+                          <div className="mt-1 text-xs text-slate-600">{wf.folder.file_count} 个视频 · {formatSize(wf.folder.total_size)}</div>
+                        </div>
+                        <button className="icon-btn danger" title="删除" onClick={() => void removeWatchFolder(wf.folder.path)}><Trash2 size={16} /></button>
+                      </div>
+                      <div className="mt-3 grid gap-2 sm:grid-cols-[180px_1fr_auto]">
+                        <select value={wf.folder.output_dest} onChange={(event) => void updateFolder(wf.folder.path, { output_dest: event.target.value })}>
+                          <option value="beside">源文件旁</option>
+                          <option value="subfolder">av1 子目录</option>
+                          <option value="custom">自定义目录</option>
+                        </select>
+                        <input value={wf.folder.output_dir || ''} disabled={wf.folder.output_dest !== 'custom'} onChange={(event) => void updateFolder(wf.folder.path, { output_dir: event.target.value })} placeholder="输出目录" />
+                        <button className="icon-btn" title="选择输出目录" disabled={wf.folder.output_dest !== 'custom'} onClick={() => { outputFolderRef.current = wf.folder.path; setBrowserMode('output'); void browseTo('/'); }}><FolderOpen size={16} /></button>
+                      </div>
+                    </div>
                   ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </section>
+                  {!watchFolders.length && <div className="rounded border border-dashed border-line p-8 text-center text-sm text-slate-500">尚未添加监控文件夹</div>}
+                </div>
 
-        <section className="panel min-h-[calc(100vh-7.5rem)]">
+                <div className="border-t border-line">
+                  <div className="flex flex-wrap items-center gap-3 px-4 py-3">
+                    <label className="inline-flex items-center gap-2 text-sm">
+                      <input type="checkbox" checked={allSelected} onChange={() => setSelectedFiles(allSelected ? [] : allFiles.map((file) => file.path))} />
+                      全选
+                    </label>
+                    <span className="text-sm text-slate-600">已选 {selectedFiles.length} / {allFiles.length}</span>
+                    <button className="btn primary ml-auto" disabled={!selectedFiles.length} onClick={() => void startTranscodeFor(selectedFiles)}><Play size={16} />开始转码</button>
+                  </div>
+                  <div className="max-h-[50vh] overflow-auto">
+                    <table className="data-table">
+                      <thead><tr><th></th><th>文件名</th><th>文件夹</th><th>大小</th></tr></thead>
+                      <tbody>
+                        {watchFolders.map((wf) => (
+                          <React.Fragment key={wf.folder.path}>
+                            {wf.files.length > 0 && (
+                              <tr className="group-row">
+                                <td><input type="checkbox" checked={wf.files.every((file) => selectedSet.has(file.path))} onChange={() => toggleFolderSelection(wf, selectedSet, setSelectedFiles)} /></td>
+                                <td colSpan={3}>{wf.folder.label || wf.folder.path}</td>
+                              </tr>
+                            )}
+                            {wf.files.map((file) => (
+                              <tr key={file.path} onClick={() => toggleFile(file.path, setSelectedFiles)}>
+                                <td><input type="checkbox" checked={selectedSet.has(file.path)} onChange={() => toggleFile(file.path, setSelectedFiles)} onClick={(event) => event.stopPropagation()} /></td>
+                                <td className="font-medium">{file.name}</td>
+                                <td className="text-slate-500">{wf.folder.label || wf.folder.path}</td>
+                                <td>{formatSize(file.size)}</td>
+                              </tr>
+                            ))}
+                          </React.Fragment>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </section>
+            )}
+
+        <section className="panel workspace-panel">
           {tab === 'transcode' && (
             <div className="space-y-4 p-4">
               <div className="section-title"><Gauge size={18} />转码设置</div>
@@ -664,12 +696,9 @@ function App() {
             </div>
           )}
         </section>
-      </main>
-
-      <footer className="mx-auto flex max-w-[1800px] items-center justify-center gap-3 px-5 pb-4 text-xs text-slate-500">
-        <span>FFT v1.0.0</span>
-        <a className="inline-flex items-center gap-1 hover:text-ink" href="/api/logs/download"><Download size={13} />下载日志</a>
-      </footer>
+          </main>
+        </div>
+      </div>
 
       {browserMode && (
         <div className="modal">
