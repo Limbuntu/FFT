@@ -12,12 +12,14 @@ import {
   FolderOpen,
   Gauge,
   Loader2,
+  Moon,
   Play,
   Plus,
   RefreshCw,
   Save,
   Settings,
   Square,
+  Sun,
   Trash2,
   X,
 } from 'lucide-react';
@@ -25,6 +27,7 @@ import './styles.css';
 
 type Tab = 'transcode' | 'benchmark' | 'presets';
 type BenchView = 'leaderboard' | 'test' | 'history';
+type Theme = 'light' | 'dark';
 
 type EncoderInfo = {
   name: string;
@@ -146,6 +149,7 @@ const navItems: { id: Tab; label: string; description: string; icon: typeof Acti
 
 function App() {
   const [tab, setTab] = useState<Tab>('transcode');
+  const [theme, setTheme] = useLocalStorage<Theme>('fft_theme', 'light');
   const [toasts, setToasts] = useState<Toast[]>([]);
   const toastSeq = useRef(0);
 
@@ -337,6 +341,10 @@ function App() {
     };
   }, [loadBenchHistory, showToast]);
 
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+  }, [theme]);
+
   async function browseTo(path: string) {
     setFileBrowser(await apiGet<FileBrowser>(`/api/files?path=${encodeURIComponent(path)}`));
   }
@@ -431,9 +439,10 @@ function App() {
 
   const lbEncoders = useMemo(() => Array.from(new Set(leaderboard.map((row) => row.encoder))), [leaderboard]);
   const activeNav = navItems.find((item) => item.id === tab) ?? navItems[0];
+  const isDark = theme === 'dark';
 
   return (
-    <div className="min-h-screen bg-mist text-ink">
+    <div className="app-root">
       <div className="fixed right-4 top-4 z-50 flex w-[min(420px,calc(100vw-2rem))] flex-col gap-2">
         {toasts.map((toast) => (
           <div key={toast.id} className={`toast ${toast.type}`}>{toast.message}</div>
@@ -478,6 +487,10 @@ function App() {
               <h2>{activeNav.label}</h2>
               <p>{activeNav.description}</p>
             </div>
+            <button className="theme-toggle" aria-label={isDark ? '切换到浅色模式' : '切换到深色模式'} title={isDark ? '浅色模式' : '深色模式'} onClick={() => setTheme(isDark ? 'light' : 'dark')}>
+              {isDark ? <Sun size={17} /> : <Moon size={17} />}
+              <span>{isDark ? '浅色' : '深色'}</span>
+            </button>
           </header>
 
           <main className={`app-main ${tab === 'transcode' ? 'workspace-grid' : 'workspace-single'}`}>
@@ -499,8 +512,8 @@ function App() {
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <div className="flex items-center gap-2 font-semibold"><Folder size={17} />{wf.folder.label || wf.folder.path}</div>
-                          <div className="mt-1 truncate text-xs text-slate-500" title={wf.folder.path}>{wf.folder.path}</div>
-                          <div className="mt-1 text-xs text-slate-600">{wf.folder.file_count} 个视频 · {formatSize(wf.folder.total_size)}</div>
+                          <div className="text-muted mt-1 truncate text-xs" title={wf.folder.path}>{wf.folder.path}</div>
+                          <div className="text-soft mt-1 text-xs">{wf.folder.file_count} 个视频 · {formatSize(wf.folder.total_size)}</div>
                         </div>
                         <button className="icon-btn danger" title="删除" onClick={() => void removeWatchFolder(wf.folder.path)}><Trash2 size={16} /></button>
                       </div>
@@ -515,7 +528,7 @@ function App() {
                       </div>
                     </div>
                   ))}
-                  {!watchFolders.length && <div className="rounded border border-dashed border-line p-8 text-center text-sm text-slate-500">尚未添加监控文件夹</div>}
+                  {!watchFolders.length && <div className="empty-state">尚未添加监控文件夹</div>}
                 </div>
 
                 <div className="border-t border-line">
@@ -524,7 +537,7 @@ function App() {
                       <input type="checkbox" checked={allSelected} onChange={() => setSelectedFiles(allSelected ? [] : allFiles.map((file) => file.path))} />
                       全选
                     </label>
-                    <span className="text-sm text-slate-600">已选 {selectedFiles.length} / {allFiles.length}</span>
+                    <span className="text-soft text-sm">已选 {selectedFiles.length} / {allFiles.length}</span>
                     <button className="btn primary ml-auto" disabled={!selectedFiles.length} onClick={() => void startTranscodeFor(selectedFiles)}><Play size={16} />开始转码</button>
                   </div>
                   <div className="max-h-[50vh] overflow-auto">
@@ -543,7 +556,7 @@ function App() {
                               <tr key={file.path} onClick={() => toggleFile(file.path, setSelectedFiles)}>
                                 <td><input type="checkbox" checked={selectedSet.has(file.path)} onChange={() => toggleFile(file.path, setSelectedFiles)} onClick={(event) => event.stopPropagation()} /></td>
                                 <td className="font-medium">{file.name}</td>
-                                <td className="text-slate-500">{wf.folder.label || wf.folder.path}</td>
+                                <td className="text-muted">{wf.folder.label || wf.folder.path}</td>
                                 <td>{formatSize(file.size)}</td>
                               </tr>
                             ))}
@@ -590,7 +603,7 @@ function App() {
 
               <div className="flex items-center justify-between pt-2">
                 <div className="section-title"><Activity size={18} />任务列表</div>
-                {totalEta && <span className="text-xs text-slate-500">{totalEta}</span>}
+                {totalEta && <span className="text-muted text-xs">{totalEta}</span>}
               </div>
               <div className="space-y-2">
                 {tasks.map((task) => (
@@ -598,16 +611,16 @@ function App() {
                     <div className="flex items-center gap-2">
                       <code>{task.task_id}</code>
                       <span className={`status ${task.status}`}>{task.status}</span>
-                      {task.eta && <span className="ml-auto text-xs text-slate-500">{task.eta}</span>}
+                      {task.eta && <span className="text-muted ml-auto text-xs">{task.eta}</span>}
                       {(task.status === 'running' || task.status === 'pending') && <button className="icon-btn" title="取消" onClick={() => void apiSend(`/api/transcode/${task.task_id}`, undefined, 'DELETE')}><Square size={15} /></button>}
                     </div>
-                    {task.current_file && <div className="mt-2 text-sm text-slate-700">{task.total_files > 1 ? `${task.current_index + 1}/${task.total_files} ` : ''}{task.current_file}</div>}
-                    {task.output_path && <div className="truncate text-xs text-slate-500" title={task.output_path}>输出: {task.output_path}</div>}
-                    <div className="mt-2 h-2 overflow-hidden rounded bg-slate-200"><div className="h-full bg-brand" style={{ width: `${task.progress || 0}%` }} /></div>
-                    <div className="mt-1 text-xs text-slate-500">{task.progress || 0}% {task.speed ? `· ${task.speed}` : ''} {task.message}</div>
+                    {task.current_file && <div className="mt-2 text-sm">{task.total_files > 1 ? `${task.current_index + 1}/${task.total_files} ` : ''}{task.current_file}</div>}
+                    {task.output_path && <div className="text-muted truncate text-xs" title={task.output_path}>输出: {task.output_path}</div>}
+                    <div className="progress-track mt-2"><div className="progress-fill" style={{ width: `${task.progress || 0}%` }} /></div>
+                    <div className="text-muted mt-1 text-xs">{task.progress || 0}% {task.speed ? `· ${task.speed}` : ''} {task.message}</div>
                   </div>
                 ))}
-                {!tasks.length && <div className="rounded border border-dashed border-line p-6 text-center text-sm text-slate-500">暂无任务</div>}
+                {!tasks.length && <div className="empty-state compact">暂无任务</div>}
               </div>
             </div>
           )}
@@ -631,8 +644,8 @@ function App() {
                       <div className="space-y-2">
                         {group.items.map((row, index) => (
                           <div key={`${row.chip}-${index}`} className="grid grid-cols-[150px_1fr] items-center gap-3">
-                            <div className="min-w-0 text-sm"><div className="truncate">{row.isMe ? row.note : row.chip}</div><div className="truncate text-xs text-slate-500">{row.isMe ? row.chip : row.note}</div></div>
-                            <div className="relative h-6 rounded bg-slate-200"><div className={row.isMe ? 'h-full rounded bg-brand' : 'h-full rounded bg-slate-400'} style={{ width: `${(row.score / group.items[0].score) * 100}%` }} /><span className="absolute right-2 top-1/2 -translate-y-1/2 text-xs font-semibold">{row.score}</span></div>
+                            <div className="min-w-0 text-sm"><div className="truncate">{row.isMe ? row.note : row.chip}</div><div className="text-muted truncate text-xs">{row.isMe ? row.chip : row.note}</div></div>
+                            <div className="score-track"><div className={row.isMe ? 'score-fill mine' : 'score-fill'} style={{ width: `${(row.score / group.items[0].score) * 100}%` }} /><span>{row.score}</span></div>
                           </div>
                         ))}
                       </div>
@@ -643,7 +656,7 @@ function App() {
 
               {benchView === 'test' && (
                 <div className="space-y-4">
-                  <div className="flex items-center justify-between"><span className="text-sm text-slate-500">{hardware.ffmpeg_version}</span><button className="btn" onClick={() => void detectHardware(true)}>{hwLoading ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}重新检测</button></div>
+                  <div className="flex items-center justify-between"><span className="text-muted text-sm">{hardware.ffmpeg_version}</span><button className="btn" onClick={() => void detectHardware(true)}>{hwLoading ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}重新检测</button></div>
                   <div className="grid gap-3 sm:grid-cols-2">
                     {hardware.encoders.map((encoder) => (
                       <button key={encoder.name} disabled={!encoder.available} className={`encoder-tile ${benchEncoders.includes(encoder.name) ? 'selected' : ''}`} onClick={() => setBenchEncoders((old) => old.includes(encoder.name) ? old.filter((name) => name !== encoder.name) : [...old, encoder.name])}>
@@ -651,8 +664,8 @@ function App() {
                       </button>
                     ))}
                   </div>
-                  <div className="flex items-center gap-2"><button className="btn primary" disabled={benchLoading} onClick={() => void runBenchmark()}><Play size={16} />开始跑分</button>{benchLoading && <button className="btn" onClick={() => { void apiSend('/api/benchmark/cancel', {}, 'POST'); setBenchLoading(false); }}><X size={16} />取消</button>}<span className="text-xs text-slate-500">{benchEncoders.length ? `已选 ${benchEncoders.length} 个编码器` : '未选择，将测试全部可用编码器'}</span></div>
-                  {benchRoundInfo && <div className="rounded bg-blue-50 px-3 py-2 text-sm text-blue-800">{benchRoundInfo}</div>}
+                  <div className="flex items-center gap-2"><button className="btn primary" disabled={benchLoading} onClick={() => void runBenchmark()}><Play size={16} />开始跑分</button>{benchLoading && <button className="btn" onClick={() => { void apiSend('/api/benchmark/cancel', {}, 'POST'); setBenchLoading(false); }}><X size={16} />取消</button>}<span className="text-muted text-xs">{benchEncoders.length ? `已选 ${benchEncoders.length} 个编码器` : '未选择，将测试全部可用编码器'}</span></div>
+                  {benchRoundInfo && <div className="notice">{benchRoundInfo}</div>}
                   <ResultsTable results={benchResults} />
                 </div>
               )}
@@ -668,7 +681,7 @@ function App() {
                 {presets.map((preset) => (
                   <div key={preset.name} className="item-card">
                     <div className="flex items-center justify-between gap-2">
-                      <div><b>{preset.name}</b>{preset.builtin && <span className="ml-2 rounded bg-slate-100 px-2 py-0.5 text-xs text-slate-500">内置</span>}</div>
+                      <div><b>{preset.name}</b>{preset.builtin && <span className="pill ml-2">内置</span>}</div>
                       <div className="flex gap-2">
                         <button className="icon-btn" title="编辑" onClick={() => { setEditingPreset(preset.name); setEditPreset({ encoder: preset.encoder, crf: preset.crf, preset: preset.preset, extra_args: (preset.extra_args || []).join(' ') }); }}><Settings size={16} /></button>
                         {!preset.builtin && <button className="icon-btn danger" title="删除" onClick={() => void apiSend(`/api/presets/${encodeURIComponent(preset.name)}`, undefined, 'DELETE').then(loadPresets)}><Trash2 size={16} /></button>}
@@ -683,7 +696,7 @@ function App() {
                         <div className="flex gap-2"><button className="btn primary" onClick={() => void savePreset({ ...preset, ...editPreset, extra_args: splitArgs(editPreset.extra_args) })}><Check size={16} />保存</button><button className="btn" onClick={() => setEditingPreset(null)}><X size={16} />取消</button></div>
                       </div>
                     ) : (
-                      <div className="mt-2 text-sm text-slate-600">编码器: {preset.encoder} · CRF: {preset.crf} · Preset: {preset.preset}<code className="mt-2 block truncate rounded bg-slate-100 px-2 py-1 text-xs">{presetCmd(preset)}</code></div>
+                      <div className="text-soft mt-2 text-sm">编码器: {preset.encoder} · CRF: {preset.crf} · Preset: {preset.preset}<code className="code-line">{presetCmd(preset)}</code></div>
                     )}
                   </div>
                 ))}
@@ -709,11 +722,11 @@ function App() {
             </div>
             <div className="flex items-center gap-2 border-b border-line px-4 py-2 text-sm">
               <button className="icon-btn" disabled={!fileBrowser.parent} onClick={() => fileBrowser.parent && void browseTo(fileBrowser.parent)}><ChevronLeft size={16} /></button>
-              <span className="truncate text-slate-600">{fileBrowser.current}</span>
+              <span className="text-soft truncate">{fileBrowser.current}</span>
             </div>
             <div className="max-h-[55vh] overflow-auto p-2">
               {fileBrowser.entries.filter((entry) => entry.is_dir).map((entry) => (
-                <button key={entry.path} className="w-full rounded px-3 py-2 text-left hover:bg-slate-100" onClick={() => void browseTo(entry.path)}><Folder size={16} className="mr-2 inline" />{entry.name}</button>
+                <button key={entry.path} className="folder-option" onClick={() => void browseTo(entry.path)}><Folder size={16} className="mr-2 inline" />{entry.name}</button>
               ))}
             </div>
             <div className="flex justify-end gap-2 border-t border-line p-4">
@@ -740,7 +753,7 @@ function Chip({ active, onClick, children }: { active: boolean; onClick: () => v
 }
 
 function ResultsTable({ results }: { results: BenchmarkResult[] }) {
-  if (!results.length) return <div className="rounded border border-dashed border-line p-6 text-center text-sm text-slate-500">暂无结果</div>;
+  if (!results.length) return <div className="empty-state compact">暂无结果</div>;
   return <table className="data-table"><thead><tr><th>编码器</th><th>FPS</th><th>耗时</th><th>大小</th><th>得分</th><th>状态</th></tr></thead><tbody>{results.map((row) => <tr key={row.encoder}><td>{row.label}</td><td>{row.error ? '-' : row.fps}</td><td>{row.elapsed}s</td><td>{row.error ? '-' : formatSize(row.output_size)}</td><td><b>{row.error ? '-' : row.score}</b></td><td><span className={`status ${row.error ? 'failed' : 'done'}`}>{row.error || 'OK'}</span></td></tr>)}</tbody></table>;
 }
 

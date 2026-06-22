@@ -4,6 +4,12 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>FFT - FFmpeg AV1 Transcoder</title>
+    <script>
+      try {
+        var storedTheme = JSON.parse(localStorage.getItem('fft_theme') || '"light"');
+        if (storedTheme === 'dark') document.documentElement.dataset.theme = 'dark';
+      } catch (_) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>
