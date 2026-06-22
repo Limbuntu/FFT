@@ -7,6 +7,7 @@ import {
   ChevronLeft,
   Cpu,
   Download,
+  FileText,
   FileVideo,
   Folder,
   FolderOpen,
@@ -476,8 +477,17 @@ function App() {
           </nav>
 
           <div className="sidebar-footer">
-            <span>FFT v1.0.0</span>
-            <a className="sidebar-log-link" href="/api/logs/download"><Download size={13} />下载日志</a>
+            <a className="sidebar-report-button" href="/api/logs/download">
+              <FileText size={18} />
+              <span>
+                <strong>报告</strong>
+                <small>下载运行日志</small>
+              </span>
+            </a>
+            <div className="sidebar-footer-meta">
+              <span>FFT v1.0.0</span>
+              <a className="sidebar-log-link" href="/api/logs/download"><Download size={13} />日志</a>
+            </div>
           </div>
         </aside>
 
@@ -496,6 +506,7 @@ function App() {
           <main className={`app-main ${tab === 'transcode' ? 'workspace-grid' : 'workspace-single'}`}>
             {tab === 'transcode' && (
               <section className="panel workspace-panel">
+                <SystemInfoPanel sysInfo={sysInfo} />
                 <div className="flex flex-wrap items-end gap-2 border-b border-line p-4">
                   <label className="field min-w-[260px] flex-1">
                     <span>监控文件夹</span>
@@ -572,6 +583,8 @@ function App() {
         <section className="panel workspace-panel">
           {tab === 'transcode' && (
             <div className="space-y-4 p-4">
+              <EncoderSupportPanel hardware={hardware} hwLoading={hwLoading} onRefresh={() => void detectHardware(true)} />
+
               <div className="section-title"><Gauge size={18} />转码设置</div>
               <div className="grid gap-3 sm:grid-cols-2">
                 <label className="field">
@@ -628,7 +641,7 @@ function App() {
           {tab === 'benchmark' && (
             <div className="space-y-4 p-4">
               <div className="section-title"><BarChart3 size={18} />跑分测试</div>
-              {sysInfo && <div className="item-card text-sm"><div><b>CPU:</b> {sysInfo.cpu} ({sysInfo.cores}核 / {sysInfo.threads}线程)</div><div><b>GPU:</b> {sysInfo.gpu}</div><div><b>内存:</b> {sysInfo.memory} · <b>系统:</b> {sysInfo.os}</div></div>}
+              <SystemInfoPanel sysInfo={sysInfo} />
               <div className="segmented w-full">
                 <button className={benchView === 'leaderboard' ? 'active' : ''} onClick={() => setBenchView('leaderboard')}>排行榜</button>
                 <button className={benchView === 'test' ? 'active' : ''} onClick={() => setBenchView('test')}>跑分测试</button>
@@ -656,14 +669,13 @@ function App() {
 
               {benchView === 'test' && (
                 <div className="space-y-4">
-                  <div className="flex items-center justify-between"><span className="text-muted text-sm">{hardware.ffmpeg_version}</span><button className="btn" onClick={() => void detectHardware(true)}>{hwLoading ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}重新检测</button></div>
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    {hardware.encoders.map((encoder) => (
-                      <button key={encoder.name} disabled={!encoder.available} className={`encoder-tile ${benchEncoders.includes(encoder.name) ? 'selected' : ''}`} onClick={() => setBenchEncoders((old) => old.includes(encoder.name) ? old.filter((name) => name !== encoder.name) : [...old, encoder.name])}>
-                        <Cpu size={19} /><span>{encoder.label}</span><code>{encoder.name}</code><small>{encoder.available ? '可用' : '不可用'}</small>
-                      </button>
-                    ))}
-                  </div>
+                  <EncoderSupportPanel
+                    hardware={hardware}
+                    hwLoading={hwLoading}
+                    selectedEncoders={benchEncoders}
+                    onRefresh={() => void detectHardware(true)}
+                    onToggle={(name) => setBenchEncoders((old) => old.includes(name) ? old.filter((item) => item !== name) : [...old, name])}
+                  />
                   <div className="flex items-center gap-2"><button className="btn primary" disabled={benchLoading} onClick={() => void runBenchmark()}><Play size={16} />开始跑分</button>{benchLoading && <button className="btn" onClick={() => { void apiSend('/api/benchmark/cancel', {}, 'POST'); setBenchLoading(false); }}><X size={16} />取消</button>}<span className="text-muted text-xs">{benchEncoders.length ? `已选 ${benchEncoders.length} 个编码器` : '未选择，将测试全部可用编码器'}</span></div>
                   {benchRoundInfo && <div className="notice">{benchRoundInfo}</div>}
                   <ResultsTable results={benchResults} />
@@ -746,6 +758,83 @@ function App() {
 
 function RangeField({ label, value, min, max, onChange }: { label: string; value: number; min: number; max: number; onChange: (value: number) => void }) {
   return <label className="field"><span>{label}: {value}</span><input type="range" min={min} max={max} value={value} onChange={(event) => onChange(Number(event.target.value))} /></label>;
+}
+
+function SystemInfoPanel({ sysInfo }: { sysInfo: SystemInfo | null }) {
+  return (
+    <div className="info-panel">
+      <div className="info-panel-head">
+        <div className="section-title"><Cpu size={18} />系统信息</div>
+      </div>
+      {sysInfo ? (
+        <div className="system-grid">
+          <InfoItem label="CPU" value={sysInfo.cpu || '未知'} detail={`${sysInfo.cores || 0} 核 / ${sysInfo.threads || 0} 线程`} />
+          <InfoItem label="GPU" value={sysInfo.gpu || '未检测到'} />
+          <InfoItem label="内存" value={sysInfo.memory || '未知'} />
+          <InfoItem label="系统" value={sysInfo.os || '未知'} />
+        </div>
+      ) : (
+        <div className="empty-state compact">系统信息加载中</div>
+      )}
+    </div>
+  );
+}
+
+function InfoItem({ label, value, detail }: { label: string; value: string; detail?: string }) {
+  return (
+    <div className="info-item">
+      <span>{label}</span>
+      <strong title={value}>{value}</strong>
+      {detail && <small>{detail}</small>}
+    </div>
+  );
+}
+
+function EncoderSupportPanel({
+  hardware,
+  hwLoading,
+  selectedEncoders = [],
+  onRefresh,
+  onToggle,
+}: {
+  hardware: HardwareReport;
+  hwLoading: boolean;
+  selectedEncoders?: string[];
+  onRefresh: () => void;
+  onToggle?: (name: string) => void;
+}) {
+  const toggleEncoder = onToggle;
+  const selectable = Boolean(toggleEncoder);
+  return (
+    <div className="info-panel">
+      <div className="info-panel-head">
+        <div>
+          <div className="section-title"><FileVideo size={18} />支持的转码方式</div>
+          {hardware.ffmpeg_version && <p>{hardware.ffmpeg_version}</p>}
+        </div>
+        <button className="btn" onClick={onRefresh}>{hwLoading ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}重新检测</button>
+      </div>
+      <div className="encoder-support-grid">
+        {hardware.encoders.map((encoder) => {
+          const selected = selectedEncoders.includes(encoder.name);
+          const className = `encoder-tile ${selected ? 'selected' : ''} ${!selectable ? 'readonly' : ''}`;
+          if (!toggleEncoder) {
+            return (
+              <div key={encoder.name} className={className}>
+                <Cpu size={19} /><span>{encoder.label}</span><code>{encoder.name}</code><small>{encoder.available ? '可用' : '不可用'}</small>
+              </div>
+            );
+          }
+          return (
+            <button key={encoder.name} disabled={!encoder.available} className={className} onClick={() => toggleEncoder(encoder.name)}>
+              <Cpu size={19} /><span>{encoder.label}</span><code>{encoder.name}</code><small>{encoder.available ? '可用' : '不可用'}</small>
+            </button>
+          );
+        })}
+        {!hardware.encoders.length && <div className="empty-state compact">暂无编码器信息</div>}
+      </div>
+    </div>
+  );
 }
 
 function Chip({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
