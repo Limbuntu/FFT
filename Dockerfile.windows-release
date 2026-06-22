@@ -1,0 +1,50 @@
+FROM docker.m.daocloud.io/library/node:22-bookworm-slim AS frontend
+
+WORKDIR /src/frontend
+COPY frontend/package*.json ./
+RUN npm config set registry https://registry.npmmirror.com && npm ci
+COPY frontend/ ./
+RUN npm run build
+
+FROM docker.m.daocloud.io/library/golang:1.22-bookworm AS builder
+
+RUN sed -i 's|http://deb.debian.org|http://mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
+    sed -i 's|http://deb.debian.org|http://mirrors.aliyun.com|g' /etc/apt/sources.list 2>/dev/null
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates zip && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+ENV GOPROXY=https://goproxy.cn,direct \
+    GOSUMDB=sum.golang.google.cn
+
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd/ ./cmd/
+COPY internal/ ./internal/
+COPY bench_leaderboard.json ./
+COPY --from=frontend /src/frontend/dist ./frontend/dist
+
+RUN CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
+    go build -trimpath -ldflags="-s -w" -o /out/FFT-windows-x64/FFT.exe ./cmd/server
+
+RUN mkdir -p /out/FFT-windows-x64/frontend && \
+    cp -R frontend/dist /out/FFT-windows-x64/frontend/dist && \
+    cp bench_leaderboard.json /out/FFT-windows-x64/bench_leaderboard.json && \
+    printf '%s\n' \
+      'FFT - FFmpeg AV1 Transcoder' \
+      '' \
+      'Requirements:' \
+      '  - ffmpeg.exe and ffprobe.exe must be in PATH' \
+      '' \
+      'Usage:' \
+      '  1. Double-click FFT.exe or run it from a terminal' \
+      '  2. Open http://127.0.0.1:8166' \
+      '' \
+      'Environment variables:' \
+      '  FFT_PORT=8166' \
+      '  FFT_OPEN_BROWSER=true' \
+      > /out/FFT-windows-x64/README.txt
+
+RUN cd /out && zip -r FFT-windows-x64-lite.zip FFT-windows-x64
