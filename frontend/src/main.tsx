@@ -190,9 +190,12 @@ function App() {
   const [watchFolders, setWatchFolders] = useState<WatchFolderResult[]>([]);
   const [wfLoading, setWfLoading] = useState(false);
   const [selectedFiles, setSelectedFiles] = useLocalStorage<string[]>('fft_selected_files', []);
-  const [autoTranscode, setAutoTranscode] = useLocalStorage('fft_auto_transcode', true);
+  const [autoTranscode, setAutoTranscode] = useLocalStorage('fft_auto_transcode_enabled', false);
   const [fileBrowser, setFileBrowser] = useState<FileBrowser>(emptyBrowser);
   const [browserMode, setBrowserMode] = useState<'watch' | 'output' | null>(null);
+  const [newFolderOpen, setNewFolderOpen] = useState(false);
+  const [newFolderName, setNewFolderName] = useState('');
+  const [newFolderBusy, setNewFolderBusy] = useState(false);
   const outputFolderRef = useRef<string>('');
   const knownFilePaths = useRef<Set<string>>(new Set());
 
@@ -390,6 +393,23 @@ function App() {
 
   async function browseTo(path: string) {
     setFileBrowser(await apiGet<FileBrowser>(`/api/files?path=${encodeURIComponent(path)}`));
+    setNewFolderOpen(false);
+    setNewFolderName('');
+  }
+
+  async function createFolder() {
+    const name = newFolderName.trim();
+    if (!name) return;
+    setNewFolderBusy(true);
+    try {
+      const result = await apiSend<{ path: string }>('/api/files/folder', { parent: fileBrowser.current, name });
+      showToast(`已创建文件夹: ${name}`, 'success');
+      await browseTo(result.path);
+    } catch (error) {
+      showToast(errorMessage(error), 'error');
+    } finally {
+      setNewFolderBusy(false);
+    }
   }
 
   async function addWatchFolder(path: string) {
@@ -796,7 +816,7 @@ function App() {
 
       {browserMode && (
         <div className="modal folder-browser-modal">
-          <div className="modal-card folder-browser-card" role="dialog" aria-modal="true" aria-label={browserMode === 'watch' ? '选择监控目录' : '选择导出目录'}>
+          <div className={`modal-card folder-browser-card ${newFolderOpen ? 'with-create-row' : ''}`} role="dialog" aria-modal="true" aria-label={browserMode === 'watch' ? '选择监控目录' : '选择导出目录'}>
             <div className="folder-browser-header">
               <div className="folder-browser-title">
                 <span className="folder-browser-icon"><FolderOpen size={18} /></span>
@@ -813,7 +833,28 @@ function App() {
                 <span>当前位置</span>
                 <strong title={fileBrowser.current}>{fileBrowser.current}</strong>
               </div>
+              <button className="btn folder-browser-new-btn" onClick={() => setNewFolderOpen((open) => !open)}><Plus size={15} />新建文件夹</button>
             </div>
+            {newFolderOpen && (
+              <form className="folder-create-row" onSubmit={(event) => {
+                event.preventDefault();
+                void createFolder();
+              }}>
+                <Folder size={17} />
+                <input
+                  autoFocus
+                  value={newFolderName}
+                  onChange={(event) => setNewFolderName(event.target.value)}
+                  placeholder="输入文件夹名称"
+                  aria-label="新建文件夹名称"
+                />
+                <button className="btn primary" type="submit" disabled={!newFolderName.trim() || newFolderBusy}>
+                  {newFolderBusy ? <Loader2 className="animate-spin" size={15} /> : <Check size={15} />}
+                  创建
+                </button>
+                <button className="btn" type="button" disabled={newFolderBusy} onClick={() => { setNewFolderOpen(false); setNewFolderName(''); }}>取消</button>
+              </form>
+            )}
             <div className="folder-browser-list">
               {browserFolders.map((entry) => (
                 <button key={entry.path} className="folder-option" onClick={() => void browseTo(entry.path)}>
@@ -1012,7 +1053,7 @@ function WatchFoldersPanel({
                   <span>输出方式</span>
                   <select value={wf.folder.output_dest} onChange={(event) => onUpdateFolder(wf.folder.path, { output_dest: event.target.value })}>
                     <option value="beside">源文件旁</option>
-                    <option value="subfolder">av1 子目录</option>
+                    <option value="subfolder">新建AV1子目录</option>
                     <option value="custom">自定义目录</option>
                   </select>
                 </label>
@@ -1062,7 +1103,7 @@ function FolderPathCard({ title, path, detail, action, muted = false }: { title:
 
 function outputFolderPath(folder: WatchFolder) {
   if (folder.output_dest === 'subfolder') {
-    return { label: 'av1 子目录', path: `${folder.path}/av1`, detail: '输出到监控目录下的 av1 文件夹' };
+    return { label: '新建AV1子目录', path: `${folder.path}/av1`, detail: '输出到监控目录下的 av1 文件夹' };
   }
   if (folder.output_dest === 'custom') {
     return {

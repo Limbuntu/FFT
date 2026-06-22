@@ -74,6 +74,7 @@ func (s *Server) routes(r *gin.Engine) {
 
 	apiGroup := r.Group("/api")
 	apiGroup.GET("/files", api.BrowseFiles)
+	apiGroup.POST("/files/folder", api.CreateFolder)
 	apiGroup.GET("/watchfolders", s.listWatchFolders)
 	apiGroup.POST("/watchfolders", s.addWatchFolder)
 	apiGroup.PATCH("/watchfolders/:path", s.updateWatchFolder)

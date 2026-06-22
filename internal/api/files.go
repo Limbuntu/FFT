@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -73,4 +74,58 @@ func BrowseFiles(c *gin.Context) {
 		Parent:  parent,
 		Entries: entries,
 	})
+}
+
+type createFolderReq struct {
+	Parent string `json:"parent"`
+	Name   string `json:"name"`
+}
+
+func CreateFolder(c *gin.Context) {
+	var req createFolderReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+		return
+	}
+
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Folder name is required"})
+		return
+	}
+	if name == "." || name == ".." || filepath.IsAbs(name) || strings.ContainsAny(name, `/\`) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid folder name"})
+		return
+	}
+
+	parent := req.Parent
+	if parent == "" {
+		parent = string(filepath.Separator)
+	}
+	absParent, err := filepath.Abs(parent)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid parent path"})
+		return
+	}
+	info, err := os.Stat(absParent)
+	if err != nil || !info.IsDir() {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Parent directory not found"})
+		return
+	}
+
+	target := filepath.Join(absParent, name)
+	if err := os.Mkdir(target, 0755); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			c.JSON(http.StatusConflict, gin.H{"error": "Folder already exists"})
+			return
+		}
+		if os.IsPermission(err) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Permission denied"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"path": target})
 }

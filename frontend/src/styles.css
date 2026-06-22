@@ -1800,6 +1800,10 @@ code {
   grid-template-rows: auto auto minmax(220px, 1fr) auto;
 }
 
+.folder-browser-card.with-create-row {
+  grid-template-rows: auto auto auto minmax(220px, 1fr) auto;
+}
+
 .folder-browser-header {
   display: flex;
   align-items: center;
@@ -1846,7 +1850,7 @@ code {
 
 .folder-browser-pathbar {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 0.7rem;
   border-bottom: 1px solid var(--color-line);
@@ -1873,6 +1877,24 @@ code {
   font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.folder-browser-new-btn {
+  white-space: nowrap;
+}
+
+.folder-create-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 0.55rem;
+  border-bottom: 1px solid var(--color-line);
+  background: var(--color-panel);
+  padding: 0.72rem 1.1rem;
+}
+
+.folder-create-row > svg {
+  color: var(--color-muted);
 }
 
 .folder-browser-list {
@@ -2162,11 +2184,30 @@ code {
     grid-template-rows: auto auto minmax(180px, 1fr) auto;
   }
 
+  .folder-browser-card.with-create-row {
+    grid-template-rows: auto auto auto minmax(180px, 1fr) auto;
+  }
+
   .folder-browser-header,
   .folder-browser-pathbar,
+  .folder-create-row,
   .folder-browser-footer {
     padding-left: 0.85rem;
     padding-right: 0.85rem;
+  }
+
+  .folder-browser-pathbar,
+  .folder-create-row {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .folder-browser-new-btn,
+  .folder-create-row .btn {
+    grid-column: 1 / -1;
+  }
+
+  .folder-create-row input {
+    min-width: 0;
   }
 
   .folder-browser-footer {
