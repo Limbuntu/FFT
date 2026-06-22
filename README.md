@@ -72,6 +72,12 @@ docker build -f Dockerfile.intel -t fft:intel .
 docker run --rm --device /dev/dri:/dev/dri -p 8166:8166 -v ./videos:/videos -v ./data:/app/data fft:intel
 ```
 
+默认不会拉取 `repositories.intel.com` 或 Jellyfin 外部源，会优先使用 Ubuntu 源里的 FFmpeg 与 VA-API 包，避免国内构建卡住。网络可用且需要 Jellyfin FFmpeg / Intel 官方运行时包时，可以这样构建：
+
+```bash
+docker build -f Dockerfile.intel --build-arg USE_JELLYFIN_FFMPEG=1 --build-arg USE_INTEL_REPO=1 -t fft:intel .
+```
+
 ## 环境变量
 
 | 变量 | 默认值 | 说明 |

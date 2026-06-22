@@ -38,5 +38,5 @@ jobs:
       - name: Build and push Intel GPU image
         run: |
           IMAGE=$REGISTRY/${GITHUB_REPOSITORY,,}
-          docker build -f Dockerfile.intel -t $IMAGE:intel .
+          docker build -f Dockerfile.intel --build-arg USE_INTEL_REPO=0 --build-arg USE_JELLYFIN_FFMPEG=0 -t $IMAGE:intel .
           docker push $IMAGE:intel

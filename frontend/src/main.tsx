@@ -5,6 +5,9 @@ import {
   BarChart3,
   Check,
   ChevronLeft,
+  CircleCheck,
+  CircleX,
+  Clock3,
   Cpu,
   Download,
   FileText,
@@ -12,6 +15,8 @@ import {
   Folder,
   FolderOpen,
   Gauge,
+  HardDrive,
+  LayoutDashboard,
   Loader2,
   Moon,
   Play,
@@ -26,7 +31,7 @@ import {
 } from 'lucide-react';
 import './styles.css';
 
-type Tab = 'transcode' | 'benchmark' | 'presets';
+type Tab = 'console' | 'transcode' | 'benchmark' | 'presets';
 type BenchView = 'leaderboard' | 'test' | 'history';
 type Theme = 'light' | 'dark';
 
@@ -79,6 +84,9 @@ type TranscodeForm = {
 
 type TaskInfo = {
   task_id: string;
+  request?: {
+    files?: string[];
+  };
   status: string;
   progress: number;
   speed: string;
@@ -143,13 +151,14 @@ type Toast = {
 const emptyBrowser: FileBrowser = { current: '/', parent: null, entries: [] };
 const defaultForm: TranscodeForm = { encoder: 'libsvtav1', crf: 28, preset: 8, suffix: '_av1', output_ext: 'auto' };
 const navItems: { id: Tab; label: string; description: string; icon: typeof Activity }[] = [
+  { id: 'console', label: '控制台', description: '查看处理概览和运行状态', icon: LayoutDashboard },
   { id: 'transcode', label: '转码', description: '监控目录、选择文件并管理转码任务', icon: FileVideo },
   { id: 'benchmark', label: '跑分', description: '测试编码器性能并查看本机记录', icon: BarChart3 },
   { id: 'presets', label: '预设', description: '维护常用编码参数和输出格式', icon: Save },
 ];
 
 function App() {
-  const [tab, setTab] = useState<Tab>('transcode');
+  const [tab, setTab] = useState<Tab>('console');
   const [theme, setTheme] = useLocalStorage<Theme>('fft_theme', 'light');
   const [toasts, setToasts] = useState<Toast[]>([]);
   const toastSeq = useRef(0);
@@ -503,7 +512,11 @@ function App() {
             </button>
           </header>
 
-          <main className={`app-main ${tab === 'transcode' ? 'workspace-grid' : 'workspace-single'}`}>
+          <main className={`app-main ${tab === 'transcode' ? 'workspace-grid' : tab === 'console' ? 'workspace-console' : 'workspace-single'}`}>
+            {tab === 'console' && (
+              <ConsolePage watchFolders={watchFolders} tasks={tasks} sysInfo={sysInfo} />
+            )}
+
             {tab === 'transcode' && (
               <section className="panel workspace-panel">
                 <SystemInfoPanel sysInfo={sysInfo} />
@@ -580,7 +593,8 @@ function App() {
               </section>
             )}
 
-        <section className="panel workspace-panel">
+            {tab !== 'console' && (
+              <section className="panel workspace-panel">
           {tab === 'transcode' && (
             <div className="space-y-4 p-4">
               <EncoderSupportPanel hardware={hardware} hwLoading={hwLoading} onRefresh={() => void detectHardware(true)} />
@@ -720,7 +734,8 @@ function App() {
               </div>
             </div>
           )}
-        </section>
+              </section>
+            )}
           </main>
         </div>
       </div>
@@ -754,6 +769,205 @@ function App() {
       )}
     </div>
   );
+}
+
+type ConsolePeriod = 'week' | 'month';
+type ResourceMode = 'cpu' | 'ram';
+
+function ConsolePage({ watchFolders, tasks, sysInfo }: { watchFolders: WatchFolderResult[]; tasks: TaskInfo[]; sysInfo: SystemInfo | null }) {
+  const [period, setPeriod] = useState<ConsolePeriod>('week');
+  const [resourceMode, setResourceMode] = useState<ResourceMode>('cpu');
+  const days = period === 'week' ? 7 : 30;
+  const fileSizes = useMemo(() => {
+    const sizes = new Map<string, number>();
+    watchFolders.forEach((wf) => wf.files.forEach((file) => sizes.set(file.path, file.size || 0)));
+    return sizes;
+  }, [watchFolders]);
+
+  const completedTasks = useMemo(() => tasks.filter((task) => task.status === 'done'), [tasks]);
+  const failedTasks = useMemo(() => tasks.filter((task) => task.status === 'failed'), [tasks]);
+  const processedBuckets = useMemo(() => bucketTasks(completedTasks, days, taskFileCount), [completedTasks, days]);
+  const savedBuckets = useMemo(
+    () => bucketTasks(completedTasks, days, (task) => estimateSavedBytes(task, fileSizes)),
+    [completedTasks, days, fileSizes],
+  );
+  const processedFiles = processedBuckets.reduce((sum, value) => sum + value, 0);
+  const storageSaved = savedBuckets.reduce((sum, value) => sum + value, 0);
+  const runningCount = tasks.filter((task) => task.status === 'running').length;
+  const upcomingCount = tasks.filter((task) => task.status === 'pending').length;
+  const finishedCount = completedTasks.reduce((sum, task) => sum + taskFileCount(task), 0);
+  const failedCount = failedTasks.reduce((sum, task) => sum + taskFileCount(task), 0);
+  const resourceValue = resourceMode === 'cpu' ? '待采样' : (sysInfo?.memory || '未知');
+  const resourceDetail = resourceMode === 'cpu'
+    ? (sysInfo ? `${sysInfo.cores || 0} 核 / ${sysInfo.threads || 0} 线程` : '等待系统信息')
+    : '系统内存容量';
+
+  return (
+    <section className="console-page" aria-label="控制台概览">
+      <div className="console-metrics">
+        <MetricCard
+          title="已处理文件"
+          value={formatCompactNumber(processedFiles)}
+          detail={processedFiles ? `每天 ${formatCompactNumber(Math.ceil(processedFiles / days))}` : '等待完成任务'}
+          tone="green"
+          points={processedBuckets}
+          toggle={{
+            value: period,
+            options: [
+              { value: 'week', label: '本周' },
+              { value: 'month', label: '本月' },
+            ],
+            onChange: (value) => setPeriod(value as ConsolePeriod),
+          }}
+        />
+        <MetricCard
+          title="节省空间"
+          value={formatSize(storageSaved)}
+          detail={storageSaved ? `每天 ${formatSize(Math.ceil(storageSaved / days))}（估算）` : '等待完成任务'}
+          tone="blue"
+          icon={HardDrive}
+          points={savedBuckets}
+          toggle={{
+            value: period,
+            options: [
+              { value: 'week', label: '本周' },
+              { value: 'month', label: '本月' },
+            ],
+            onChange: (value) => setPeriod(value as ConsolePeriod),
+          }}
+        />
+        <MetricCard
+          title={resourceMode === 'cpu' ? '处理器' : '内存'}
+          value={resourceValue}
+          detail={resourceDetail}
+          tone="amber"
+          icon={Cpu}
+          points={resourceMode === 'cpu' ? [0, 0, 0, 0, 0, 0, 0] : [1, 1, 1, 1, 1, 1, 1]}
+          toggle={{
+            value: resourceMode,
+            options: [
+              { value: 'cpu', label: '处理器' },
+              { value: 'ram', label: '内存' },
+            ],
+            onChange: (value) => setResourceMode(value as ResourceMode),
+          }}
+        />
+      </div>
+
+      <div className="files-overview">
+        <div className="files-overview-head">
+          <div className="files-overview-title">文件</div>
+          <div className="file-status-strip">
+            <StatusChip tone="running" icon={Activity} label="运行中" value={runningCount} />
+            <StatusChip tone="upcoming" icon={Clock3} label="待处理" value={upcomingCount} />
+            <StatusChip tone="finished" icon={CircleCheck} label="已完成" value={finishedCount} />
+            <StatusChip tone="failed" icon={CircleX} label="失败" value={failedCount} />
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function MetricCard({
+  title,
+  value,
+  detail,
+  tone,
+  points,
+  icon: Icon,
+  toggle,
+}: {
+  title: string;
+  value: string;
+  detail: string;
+  tone: 'green' | 'blue' | 'amber';
+  points: number[];
+  icon?: typeof Activity;
+  toggle: {
+    value: string;
+    options: { value: string; label: string }[];
+    onChange: (value: string) => void;
+  };
+}) {
+  return (
+    <div className={`metric-card metric-card-${tone}`}>
+      <div className="metric-card-head">
+        <h3>{title}</h3>
+        <div className="metric-toggle" aria-label={`${title}切换`}>
+          {toggle.options.map((option) => (
+            <button key={option.value} className={toggle.value === option.value ? 'active' : ''} onClick={() => toggle.onChange(option.value)}>
+              {option.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="metric-value-row">
+        {Icon && <div className="metric-icon"><Icon size={27} /></div>}
+        <div>
+          <div className="metric-number">{value}</div>
+          <div className="metric-detail">{detail}</div>
+        </div>
+      </div>
+      <MetricSparkline points={points} />
+    </div>
+  );
+}
+
+function MetricSparkline({ points }: { points: number[] }) {
+  const safePoints = points.length ? points : [0];
+  const max = Math.max(...safePoints, 1);
+  const step = safePoints.length > 1 ? 100 / (safePoints.length - 1) : 100;
+  const line = safePoints
+    .map((point, index) => {
+      const x = Number((index * step).toFixed(2));
+      const y = Number((38 - (point / max) * 28).toFixed(2));
+      return `${index === 0 ? 'M' : 'L'} ${x} ${y}`;
+    })
+    .join(' ');
+  const area = `${line} L 100 40 L 0 40 Z`;
+
+  return (
+    <svg className="metric-chart" viewBox="0 0 100 40" preserveAspectRatio="none" aria-hidden="true">
+      <path className="metric-area" d={area} />
+      <path className="metric-line" d={line} />
+    </svg>
+  );
+}
+
+function StatusChip({ tone, icon: Icon, label, value }: { tone: 'running' | 'upcoming' | 'finished' | 'failed'; icon: typeof Activity; label: string; value: number }) {
+  return (
+    <div className={`file-status-chip ${tone}`}>
+      <Icon size={18} />
+      <span>{label}</span>
+      <strong>{formatCompactNumber(value)}</strong>
+    </div>
+  );
+}
+
+function bucketTasks(tasks: TaskInfo[], days: number, getValue: (task: TaskInfo) => number) {
+  const buckets = Array.from({ length: days }, () => 0);
+  const today = startOfDay(new Date()).getTime();
+  for (const task of tasks) {
+    const createdAt = new Date(task.created_at);
+    if (Number.isNaN(createdAt.getTime())) continue;
+    const diff = Math.floor((today - startOfDay(createdAt).getTime()) / 86400000);
+    if (diff >= 0 && diff < days) buckets[days - 1 - diff] += getValue(task);
+  }
+  return buckets;
+}
+
+function startOfDay(date: Date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function taskFileCount(task: TaskInfo) {
+  return task.total_files || task.request?.files?.length || 1;
+}
+
+function estimateSavedBytes(task: TaskInfo, fileSizes: Map<string, number>) {
+  const inputBytes = (task.request?.files || []).reduce((sum, file) => sum + (fileSizes.get(file) || 0), 0);
+  return inputBytes ? Math.round(inputBytes * 0.35) : 0;
 }
 
 function RangeField({ label, value, min, max, onChange }: { label: string; value: number; min: number; max: number; onChange: (value: number) => void }) {
@@ -902,6 +1116,10 @@ function formatSize(bytes = 0) {
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
   const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
   return `${(bytes / 1024 ** index).toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+}
+
+function formatCompactNumber(value: number) {
+  return new Intl.NumberFormat('zh-CN').format(Math.max(0, Math.round(value || 0)));
 }
 
 function formatDuration(seconds: number) {

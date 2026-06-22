@@ -398,6 +398,10 @@ code {
   grid-template-columns: minmax(0, 1080px);
 }
 
+.workspace-console {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .workspace-panel {
   min-height: calc(100vh - 7.6rem);
 }
@@ -477,6 +481,229 @@ code {
   align-items: center;
   gap: 0.5rem;
   font-weight: 700;
+}
+
+.console-page {
+  display: grid;
+  gap: 1rem;
+  min-height: calc(100vh - 7.6rem);
+}
+
+.console-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.55rem;
+}
+
+.metric-card {
+  --metric-accent: var(--color-good);
+  --metric-fill: rgb(20 131 79 / 0.14);
+  position: relative;
+  min-height: 11rem;
+  overflow: hidden;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  background: var(--color-panel);
+  box-shadow: var(--shadow-soft);
+  padding: 0.72rem;
+}
+
+.metric-card-blue {
+  --metric-accent: #3f5dff;
+  --metric-fill: rgb(63 93 255 / 0.13);
+}
+
+.metric-card-amber {
+  --metric-accent: #d99a18;
+  --metric-fill: rgb(217 154 24 / 0.14);
+}
+
+.metric-card-head,
+.metric-value-row {
+  position: relative;
+  z-index: 1;
+}
+
+.metric-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.metric-card h3 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 780;
+  line-height: 1.2;
+}
+
+.metric-toggle {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 0.2rem;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  background: var(--color-bg);
+  padding: 0.22rem;
+}
+
+.metric-toggle button {
+  min-width: 3.25rem;
+  min-height: 2rem;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-muted);
+  padding: 0.28rem 0.58rem;
+  font-size: 0.82rem;
+  font-weight: 760;
+  cursor: pointer;
+}
+
+.metric-toggle button.active {
+  border-color: var(--color-line-strong);
+  background: var(--color-control);
+  color: var(--color-ink);
+  box-shadow: var(--shadow-topbar);
+}
+
+.metric-value-row {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  margin-top: 1.25rem;
+}
+
+.metric-icon {
+  display: grid;
+  width: 2.6rem;
+  height: 2.6rem;
+  flex: 0 0 auto;
+  place-items: center;
+  color: var(--color-ink);
+}
+
+.metric-number {
+  font-size: clamp(1.55rem, 2vw, 2rem);
+  font-weight: 760;
+  line-height: 1.05;
+}
+
+.metric-detail {
+  margin-top: 0.28rem;
+  color: var(--color-soft);
+  font-size: 0.98rem;
+  font-weight: 720;
+  line-height: 1.2;
+}
+
+.metric-chart {
+  position: absolute;
+  inset: auto 0 0;
+  width: 100%;
+  height: 4.7rem;
+  color: var(--metric-accent);
+}
+
+.metric-area {
+  fill: var(--metric-fill);
+}
+
+.metric-line {
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.files-overview {
+  overflow: hidden;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  background: var(--color-panel);
+  box-shadow: var(--shadow-soft);
+}
+
+.files-overview-head {
+  display: flex;
+  min-height: 4.6rem;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem;
+}
+
+.files-overview-title {
+  font-size: 1rem;
+  font-weight: 780;
+  line-height: 1.2;
+}
+
+.file-status-strip {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.35rem;
+}
+
+.file-status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-height: 2.25rem;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  background: var(--color-control);
+  color: var(--color-muted);
+  padding: 0.42rem 0.62rem;
+  font-weight: 760;
+  white-space: nowrap;
+}
+
+.file-status-chip svg {
+  flex: 0 0 auto;
+}
+
+.file-status-chip strong {
+  color: var(--color-ink);
+}
+
+.file-status-chip.running svg {
+  color: #2563eb;
+}
+
+.file-status-chip.upcoming svg {
+  color: #d99a18;
+}
+
+.file-status-chip.finished svg {
+  color: var(--color-good);
+}
+
+.file-status-chip.failed svg {
+  color: #dc2626;
+}
+
+:root[data-theme='dark'] .metric-card,
+:root[data-theme='dark'] .files-overview {
+  background: #0f1012;
+  border-color: #2a2b2f;
+}
+
+:root[data-theme='dark'] .metric-toggle,
+:root[data-theme='dark'] .file-status-chip {
+  background: #101114;
+  border-color: #27292f;
+}
+
+:root[data-theme='dark'] .metric-toggle button.active {
+  background: #24262b;
+}
+
+:root[data-theme='dark'] .metric-card {
+  --metric-fill: color-mix(in srgb, var(--metric-accent) 18%, transparent);
 }
 
 .info-panel {
@@ -868,8 +1095,22 @@ code {
   }
 
   .workspace-grid,
+  .workspace-console,
   .workspace-single {
     grid-template-columns: 1fr;
+  }
+
+  .console-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .files-overview-head {
+    flex-direction: column;
+  }
+
+  .file-status-strip {
+    width: 100%;
+    justify-content: flex-start;
   }
 
   .workspace-panel {
@@ -893,6 +1134,10 @@ code {
 
 @media (min-width: 721px) and (max-width: 1320px) {
   .workspace-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .console-metrics {
     grid-template-columns: 1fr;
   }
 

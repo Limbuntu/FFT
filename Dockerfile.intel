@@ -21,27 +21,47 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/fft ./c
 
 FROM docker.m.daocloud.io/library/ubuntu:22.04
 
+ARG USE_INTEL_REPO=0
+ARG USE_JELLYFIN_FFMPEG=0
+ENV DEBIAN_FRONTEND=noninteractive
+
 RUN sed -i 's|http://archive.ubuntu.com|http://mirrors.aliyun.com|g' /etc/apt/sources.list && \
     sed -i 's|http://security.ubuntu.com|http://mirrors.aliyun.com|g' /etc/apt/sources.list
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        ca-certificates gpg-agent software-properties-common wget curl && \
-    wget -qO - https://repositories.intel.com/gpu/intel-graphics.key | \
-        gpg --dearmor -o /usr/share/keyrings/intel-graphics.gpg && \
-    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/intel-graphics.gpg] https://repositories.intel.com/gpu/ubuntu jammy unified" \
-        > /etc/apt/sources.list.d/intel-gpu.list && \
-    curl -fsSL https://repo.jellyfin.org/ubuntu/jellyfin_team.gpg.key | \
-        gpg --dearmor -o /usr/share/keyrings/jellyfin.gpg && \
-    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/jellyfin.gpg] https://repo.jellyfin.org/ubuntu jammy main" \
-        > /etc/apt/sources.list.d/jellyfin.list && \
+        ca-certificates gpg curl && \
+    if [ "$USE_JELLYFIN_FFMPEG" = "1" ]; then \
+        curl -fsSL https://repo.jellyfin.org/ubuntu/jellyfin_team.gpg.key | \
+            gpg --dearmor -o /usr/share/keyrings/jellyfin.gpg && \
+        echo "deb [arch=amd64 signed-by=/usr/share/keyrings/jellyfin.gpg] https://repo.jellyfin.org/ubuntu jammy main" \
+            > /etc/apt/sources.list.d/jellyfin.list; \
+    else \
+        echo "Skipping Jellyfin FFmpeg repository; using Ubuntu FFmpeg"; \
+    fi && \
+    if [ "$USE_INTEL_REPO" = "1" ]; then \
+        curl -fsSL https://repositories.intel.com/gpu/intel-graphics.key | \
+            gpg --dearmor -o /usr/share/keyrings/intel-graphics.gpg && \
+        echo "deb [arch=amd64 signed-by=/usr/share/keyrings/intel-graphics.gpg] https://repositories.intel.com/gpu/ubuntu jammy unified" \
+            > /etc/apt/sources.list.d/intel-gpu.list; \
+    else \
+        echo "Skipping Intel official GPU repository; using Ubuntu packages for QSV runtime"; \
+    fi && \
     apt-get update && \
-    apt-get install -y --no-install-recommends \
-        intel-opencl-icd intel-media-va-driver-non-free libmfx1 libvpl2 \
-        vainfo jellyfin-ffmpeg7 pciutils && \
-    ln -sf /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/local/bin/ffmpeg && \
-    ln -sf /usr/lib/jellyfin-ffmpeg/ffprobe /usr/local/bin/ffprobe && \
-    apt-get purge -y gpg-agent software-properties-common wget curl && \
+    if [ "$USE_JELLYFIN_FFMPEG" = "1" ] || [ "$USE_INTEL_REPO" = "1" ]; then \
+        packages="intel-media-va-driver-non-free libmfx1 libvpl2 vainfo pciutils" && \
+        if [ "$USE_JELLYFIN_FFMPEG" = "1" ]; then packages="$packages jellyfin-ffmpeg7"; else packages="$packages ffmpeg"; fi && \
+        if [ "$USE_INTEL_REPO" = "1" ]; then packages="$packages intel-opencl-icd"; fi && \
+        apt-get install -y --no-install-recommends $packages; \
+    else \
+        apt-get install -y --no-install-recommends ffmpeg vainfo pciutils intel-media-va-driver || \
+        apt-get install -y --no-install-recommends ffmpeg vainfo pciutils; \
+    fi && \
+    if [ "$USE_JELLYFIN_FFMPEG" = "1" ]; then \
+        ln -sf /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/local/bin/ffmpeg && \
+        ln -sf /usr/lib/jellyfin-ffmpeg/ffprobe /usr/local/bin/ffprobe; \
+    fi && \
+    apt-get purge -y gpg curl && \
     apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/*
 
