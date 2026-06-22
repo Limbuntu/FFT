@@ -52,7 +52,7 @@ func New(cfg config.Config, db *fftdb.DB) *Server {
 		db:           db,
 		hub:          hub,
 		hardware:     detector,
-		transcoder:   transcode.New(hub),
+		transcoder:   transcode.New(hub, db),
 		watchFolders: watchfolders.New(db),
 		presets:      presets.New(db),
 	}

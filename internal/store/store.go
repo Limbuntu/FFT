@@ -75,6 +75,25 @@ func (d *DB) Migrate() error {
 			error TEXT NOT NULL DEFAULT '',
 			updated_at TEXT NOT NULL
 		);`,
+		`CREATE TABLE IF NOT EXISTS transcode_tasks (
+			task_id TEXT PRIMARY KEY,
+			request TEXT NOT NULL,
+			status TEXT NOT NULL,
+			progress REAL NOT NULL DEFAULT 0,
+			speed TEXT NOT NULL DEFAULT '',
+			eta TEXT NOT NULL DEFAULT '',
+			eta_seconds REAL NOT NULL DEFAULT 0,
+			current_file TEXT NOT NULL DEFAULT '',
+			current_index INTEGER NOT NULL DEFAULT 0,
+			total_files INTEGER NOT NULL DEFAULT 0,
+			message TEXT NOT NULL DEFAULT '',
+			output_path TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			finished_at TEXT NOT NULL DEFAULT '',
+			duration_sec REAL NOT NULL DEFAULT 0,
+			results TEXT NOT NULL DEFAULT '[]',
+			updated_at TEXT NOT NULL
+		);`,
 	}
 	for _, stmt := range statements {
 		if _, err := d.db.Exec(stmt); err != nil {
@@ -291,6 +310,121 @@ func (d *DB) BenchmarkHistory() (map[string]any, error) {
 		return nil, err
 	}
 	return map[string]any{"results": results, "timestamp": nullableTimestamp(timestamp)}, nil
+}
+
+func (d *DB) SaveTranscodeTask(task models.TaskInfo) error {
+	req, err := json.Marshal(task.Request)
+	if err != nil {
+		return err
+	}
+	results, err := json.Marshal(task.Results)
+	if err != nil {
+		return err
+	}
+	now := time.Now().Format(time.RFC3339Nano)
+	_, err = d.db.Exec(
+		`INSERT INTO transcode_tasks(
+			task_id, request, status, progress, speed, eta, eta_seconds,
+			current_file, current_index, total_files, message, output_path,
+			created_at, finished_at, duration_sec, results, updated_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(task_id) DO UPDATE SET
+			request = excluded.request,
+			status = excluded.status,
+			progress = excluded.progress,
+			speed = excluded.speed,
+			eta = excluded.eta,
+			eta_seconds = excluded.eta_seconds,
+			current_file = excluded.current_file,
+			current_index = excluded.current_index,
+			total_files = excluded.total_files,
+			message = excluded.message,
+			output_path = excluded.output_path,
+			finished_at = excluded.finished_at,
+			duration_sec = excluded.duration_sec,
+			results = excluded.results,
+			updated_at = excluded.updated_at`,
+		task.TaskID,
+		string(req),
+		task.Status,
+		task.Progress,
+		task.Speed,
+		task.ETA,
+		task.ETASeconds,
+		task.CurrentFile,
+		task.CurrentIndex,
+		task.TotalFiles,
+		task.Message,
+		task.OutputPath,
+		formatTime(task.CreatedAt),
+		formatTime(task.FinishedAt),
+		task.DurationSec,
+		string(results),
+		now,
+	)
+	return err
+}
+
+func (d *DB) TranscodeTasks() ([]models.TaskInfo, error) {
+	rows, err := d.db.Query(
+		`SELECT task_id, request, status, progress, speed, eta, eta_seconds,
+			current_file, current_index, total_files, message, output_path,
+			created_at, finished_at, duration_sec, results
+		 FROM transcode_tasks
+		 ORDER BY created_at DESC`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tasks []models.TaskInfo
+	for rows.Next() {
+		var task models.TaskInfo
+		var requestJSON, resultsJSON, createdAt, finishedAt string
+		if err := rows.Scan(
+			&task.TaskID,
+			&requestJSON,
+			&task.Status,
+			&task.Progress,
+			&task.Speed,
+			&task.ETA,
+			&task.ETASeconds,
+			&task.CurrentFile,
+			&task.CurrentIndex,
+			&task.TotalFiles,
+			&task.Message,
+			&task.OutputPath,
+			&createdAt,
+			&finishedAt,
+			&task.DurationSec,
+			&resultsJSON,
+		); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal([]byte(requestJSON), &task.Request)
+		_ = json.Unmarshal([]byte(resultsJSON), &task.Results)
+		task.CreatedAt = parseTime(createdAt)
+		task.FinishedAt = parseTime(finishedAt)
+		tasks = append(tasks, task)
+	}
+	return tasks, rows.Err()
+}
+
+func formatTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.Format(time.RFC3339Nano)
+}
+
+func parseTime(value string) time.Time {
+	if value == "" {
+		return time.Time{}
+	}
+	t, _ := time.Parse(time.RFC3339Nano, value)
+	return t
 }
 
 func nullableTimestamp(value string) any {

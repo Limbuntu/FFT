@@ -189,7 +189,6 @@ function App() {
 
   const [watchFolders, setWatchFolders] = useState<WatchFolderResult[]>([]);
   const [wfLoading, setWfLoading] = useState(false);
-  const [newFolderPath, setNewFolderPath] = useState('');
   const [selectedFiles, setSelectedFiles] = useLocalStorage<string[]>('fft_selected_files', []);
   const [autoTranscode, setAutoTranscode] = useLocalStorage('fft_auto_transcode', true);
   const [fileBrowser, setFileBrowser] = useState<FileBrowser>(emptyBrowser);
@@ -393,10 +392,9 @@ function App() {
     setFileBrowser(await apiGet<FileBrowser>(`/api/files?path=${encodeURIComponent(path)}`));
   }
 
-  async function addWatchFolder(path = newFolderPath) {
+  async function addWatchFolder(path: string) {
     if (!path) return;
     await apiSend('/api/watchfolders', { path });
-    setNewFolderPath('');
     await loadWatchFolders(false);
   }
 
@@ -432,6 +430,10 @@ function App() {
 
   async function uploadOnlineFiles(files: File[]) {
     if (!files.length) return;
+    if (!selectedPreset) {
+      showToast('请先选择在线转码预设', 'error');
+      return;
+    }
     for (const file of files) {
       const id = `${file.name}-${file.size}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
       setOnlineJobs((jobs) => [{ id, name: file.name, size: file.size, status: 'uploading', progress: 0, message: '上传中' }, ...jobs]);
@@ -515,13 +517,23 @@ function App() {
       );
     }
     if (lbEncoder) rows = rows.filter((row) => row.encoder === lbEncoder);
-    return groupBy(rows, (row) => row.encoder).map(([encoder, items]) => ({
-      encoder,
-      items: items.sort((a, b) => b.score - a.score),
-    }));
+    return groupBy(rows, (row) => row.encoder)
+      .map(([encoder, items]) => ({
+        encoder,
+        items: items.sort((a, b) => b.score - a.score),
+      }))
+      .sort((a, b) => compareEncoders(a.encoder, b.encoder));
   }, [benchHistory, lbEncoder, leaderboard, sysInfo]);
 
-  const lbEncoders = useMemo(() => Array.from(new Set(leaderboard.map((row) => row.encoder))), [leaderboard]);
+  const lbEncoders = useMemo(() => sortEncoders(Array.from(new Set([
+    ...leaderboard.map((row) => row.encoder),
+    ...(benchHistory?.results || []).filter((result) => !result.error).map((result) => result.encoder),
+  ]))), [benchHistory, leaderboard]);
+
+  useEffect(() => {
+    if (lbEncoders.length && !lbEncoders.includes(lbEncoder)) setLbEncoder(lbEncoders[0]);
+  }, [lbEncoder, lbEncoders]);
+
   const isDark = theme === 'dark';
 
   return (
@@ -560,27 +572,45 @@ function App() {
 
           <div className="sidebar-footer">
             <div className="sidebar-footer-meta">
-              <span>FFT v1.0.0</span>
+              <span className="sidebar-version">FFT v1.0.0</span>
+              <button className="theme-toggle" aria-label={isDark ? '切换到浅色模式' : '切换到深色模式'} title={isDark ? '浅色模式' : '深色模式'} onClick={() => setTheme(isDark ? 'light' : 'dark')}>
+                {isDark ? <Sun size={14} /> : <Moon size={14} />}
+              </button>
               <a className="sidebar-log-link" href="/api/logs/download"><Download size={13} />日志</a>
             </div>
           </div>
         </aside>
 
         <div className="app-content">
-          <header className="app-topbar">
-            <button className="theme-toggle" aria-label={isDark ? '切换到浅色模式' : '切换到深色模式'} title={isDark ? '浅色模式' : '深色模式'} onClick={() => setTheme(isDark ? 'light' : 'dark')}>
-              {isDark ? <Sun size={17} /> : <Moon size={17} />}
-              <span>{isDark ? '浅色' : '深色'}</span>
-            </button>
-          </header>
-
           <main className={`app-main ${tab === 'transcode' ? 'workspace-grid' : tab === 'console' || tab === 'online' || tab === 'system' ? 'workspace-console' : 'workspace-single'}`}>
             {tab === 'console' && (
-              <ConsolePage watchFolders={watchFolders} tasks={tasks} sysInfo={sysInfo} />
+              <ConsolePage
+                watchFolders={watchFolders}
+                tasks={tasks}
+                sysInfo={sysInfo}
+                onBrowseWatchFolder={() => { setBrowserMode('watch'); void browseTo('/'); }}
+                onRefreshWatchFolders={() => void loadWatchFolders(false)}
+                wfLoading={wfLoading}
+                onRemoveWatchFolder={(path) => void removeWatchFolder(path)}
+                onUpdateFolder={(path, patch) => void updateFolder(path, patch)}
+                onBrowseOutputFolder={(path) => { outputFolderRef.current = path; setBrowserMode('output'); void browseTo('/'); }}
+              />
             )}
 
             {tab === 'online' && (
-              <OnlinePage jobs={onlineJobs} tasks={onlineTasks} form={form} onUpload={(files) => void uploadOnlineFiles(files)} onDownloadReport={downloadTaskReport} />
+              <OnlinePage
+                jobs={onlineJobs}
+                tasks={onlineTasks}
+                presets={presets}
+                selectedPreset={selectedPreset}
+                onPresetChange={(name) => {
+                  setSelectedPreset(name);
+                  const preset = presets.find((item) => item.name === name);
+                  if (preset) setForm((old) => ({ ...old, encoder: preset.encoder, crf: preset.crf, preset: preset.preset, output_ext: preset.output_ext || old.output_ext }));
+                }}
+                onUpload={(files) => void uploadOnlineFiles(files)}
+                onDownloadReport={downloadTaskReport}
+              />
             )}
 
             {tab === 'system' && (
@@ -589,42 +619,7 @@ function App() {
 
             {tab === 'transcode' && (
               <section className="panel workspace-panel">
-                <div className="flex flex-wrap items-end gap-2 border-b border-line p-4">
-                  <label className="field min-w-[260px] flex-1">
-                    <span>监控文件夹</span>
-                    <input value={newFolderPath} onChange={(event) => setNewFolderPath(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && void addWatchFolder()} placeholder="输入目录路径，或浏览选择" />
-                  </label>
-                  <button className="btn primary" onClick={() => void addWatchFolder()} disabled={!newFolderPath}><Plus size={16} />添加</button>
-                  <button className="btn" onClick={() => { setBrowserMode('watch'); void browseTo('/'); }}><FolderOpen size={16} />浏览</button>
-                  <button className="icon-btn" title="刷新" onClick={() => void loadWatchFolders(false)}>{wfLoading ? <Loader2 className="animate-spin" size={17} /> : <RefreshCw size={17} />}</button>
-                </div>
-
-                <div className="grid gap-3 p-4 lg:grid-cols-2">
-                  {watchFolders.map((wf) => (
-                    <div key={wf.folder.path} className="item-card">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2 font-semibold"><Folder size={17} />{wf.folder.label || wf.folder.path}</div>
-                          <div className="text-muted mt-1 truncate text-xs" title={wf.folder.path}>{wf.folder.path}</div>
-                          <div className="text-soft mt-1 text-xs">{wf.folder.file_count} 个视频 · {formatSize(wf.folder.total_size)}</div>
-                        </div>
-                        <button className="icon-btn danger" title="删除" onClick={() => void removeWatchFolder(wf.folder.path)}><Trash2 size={16} /></button>
-                      </div>
-                      <div className="mt-3 grid gap-2 sm:grid-cols-[180px_1fr_auto]">
-                        <select value={wf.folder.output_dest} onChange={(event) => void updateFolder(wf.folder.path, { output_dest: event.target.value })}>
-                          <option value="beside">源文件旁</option>
-                          <option value="subfolder">av1 子目录</option>
-                          <option value="custom">自定义目录</option>
-                        </select>
-                        <input value={wf.folder.output_dir || ''} disabled={wf.folder.output_dest !== 'custom'} onChange={(event) => void updateFolder(wf.folder.path, { output_dir: event.target.value })} placeholder="输出目录" />
-                        <button className="icon-btn" title="选择输出目录" disabled={wf.folder.output_dest !== 'custom'} onClick={() => { outputFolderRef.current = wf.folder.path; setBrowserMode('output'); void browseTo('/'); }}><FolderOpen size={16} /></button>
-                      </div>
-                    </div>
-                  ))}
-                  {!watchFolders.length && <div className="empty-state">尚未添加监控文件夹</div>}
-                </div>
-
-                <div className="border-t border-line">
+                <div>
                   <div className="flex flex-wrap items-center gap-3 px-4 py-3">
                     <label className="inline-flex items-center gap-2 text-sm">
                       <input type="checkbox" checked={allSelected} onChange={() => setSelectedFiles(allSelected ? [] : allFiles.map((file) => file.path))} />
@@ -735,7 +730,7 @@ function App() {
 
               {benchView === 'leaderboard' && (
                 <div className="space-y-4">
-                  <div className="flex flex-wrap gap-2"><Chip active={!lbEncoder} onClick={() => setLbEncoder('')}>全部</Chip>{lbEncoders.map((encoder) => <Chip key={encoder} active={lbEncoder === encoder} onClick={() => setLbEncoder(encoder)}>{encoder}</Chip>)}</div>
+                  <div className="flex flex-wrap gap-2">{lbEncoders.map((encoder) => <Chip key={encoder} active={lbEncoder === encoder} onClick={() => setLbEncoder(encoder)}>{encoder}</Chip>)}</div>
                   {filteredLeaderboard.map((group) => (
                     <div key={group.encoder}>
                       <h3 className="mb-2 font-semibold">{group.encoder}</h3>
@@ -807,7 +802,7 @@ function App() {
                 <span className="folder-browser-icon"><FolderOpen size={18} /></span>
                 <div>
                   <h2>{browserMode === 'watch' ? '选择监控目录' : '选择导出目录'}</h2>
-                  <p>{browserMode === 'watch' ? '监控文件夹' : '自定义输出'}</p>
+                  <p>{browserMode === 'watch' ? '目录监控' : '自定义输出'}</p>
                 </div>
               </div>
               <button className="icon-btn" aria-label="关闭" onClick={() => setBrowserMode(null)}><X size={16} /></button>
@@ -858,7 +853,27 @@ function App() {
 type ConsolePeriod = 'week' | 'month';
 type ResourceMode = 'cpu' | 'ram';
 
-function ConsolePage({ watchFolders, tasks, sysInfo }: { watchFolders: WatchFolderResult[]; tasks: TaskInfo[]; sysInfo: SystemInfo | null }) {
+function ConsolePage({
+  watchFolders,
+  tasks,
+  sysInfo,
+  onBrowseWatchFolder,
+  onRefreshWatchFolders,
+  wfLoading,
+  onRemoveWatchFolder,
+  onUpdateFolder,
+  onBrowseOutputFolder,
+}: {
+  watchFolders: WatchFolderResult[];
+  tasks: TaskInfo[];
+  sysInfo: SystemInfo | null;
+  onBrowseWatchFolder: () => void;
+  onRefreshWatchFolders: () => void;
+  wfLoading: boolean;
+  onRemoveWatchFolder: (path: string) => void;
+  onUpdateFolder: (path: string, patch: Partial<Pick<WatchFolder, 'output_dest' | 'output_dir'>>) => void;
+  onBrowseOutputFolder: (path: string) => void;
+}) {
   const [period, setPeriod] = useState<ConsolePeriod>('week');
   const [resourceMode, setResourceMode] = useState<ResourceMode>('cpu');
   const days = period === 'week' ? 7 : 30;
@@ -938,19 +953,125 @@ function ConsolePage({ watchFolders, tasks, sysInfo }: { watchFolders: WatchFold
         />
       </div>
 
-      <div className="files-overview">
-        <div className="files-overview-head">
-          <div className="files-overview-title">文件</div>
+      <WatchFoldersPanel
+        watchFolders={watchFolders}
+        onBrowseWatchFolder={onBrowseWatchFolder}
+        onRefreshWatchFolders={onRefreshWatchFolders}
+        wfLoading={wfLoading}
+        onRemoveWatchFolder={onRemoveWatchFolder}
+        onUpdateFolder={onUpdateFolder}
+        onBrowseOutputFolder={onBrowseOutputFolder}
+        statusChips={(
           <div className="file-status-strip">
             <StatusChip tone="running" icon={Activity} label="运行中" value={runningCount} />
             <StatusChip tone="upcoming" icon={Clock3} label="待处理" value={upcomingCount} />
             <StatusChip tone="finished" icon={CircleCheck} label="已完成" value={finishedCount} />
             <StatusChip tone="failed" icon={CircleX} label="失败" value={failedCount} />
           </div>
-        </div>
+        )}
+      />
+    </section>
+  );
+}
+
+function WatchFoldersPanel({
+  watchFolders,
+  onBrowseWatchFolder,
+  onRefreshWatchFolders,
+  wfLoading,
+  onRemoveWatchFolder,
+  onUpdateFolder,
+  onBrowseOutputFolder,
+  statusChips,
+}: {
+  watchFolders: WatchFolderResult[];
+  onBrowseWatchFolder: () => void;
+  onRefreshWatchFolders: () => void;
+  wfLoading: boolean;
+  onRemoveWatchFolder: (path: string) => void;
+  onUpdateFolder: (path: string, patch: Partial<Pick<WatchFolder, 'output_dest' | 'output_dir'>>) => void;
+  onBrowseOutputFolder: (path: string) => void;
+  statusChips?: React.ReactNode;
+}) {
+  return (
+    <section className="watch-folders-panel">
+      <div className="watch-folder-toolbar">
+        <div className="section-title"><Folder size={18} />目录监控</div>
+        {statusChips}
+        <button className="btn primary" onClick={onBrowseWatchFolder}><FolderOpen size={16} />浏览添加</button>
+        <button className="icon-btn" title="刷新" onClick={onRefreshWatchFolders}>{wfLoading ? <Loader2 className="animate-spin" size={17} /> : <RefreshCw size={17} />}</button>
+      </div>
+      <div className="watch-folder-list">
+        {watchFolders.map((wf) => {
+          const outputPath = outputFolderPath(wf.folder);
+          const needsCustomOutput = wf.folder.output_dest === 'custom' && !wf.folder.output_dir;
+          return (
+            <div key={wf.folder.path} className="item-card watch-folder-card">
+              <div className="watch-folder-card-head">
+                <label className="field watch-output-mode">
+                  <span>输出方式</span>
+                  <select value={wf.folder.output_dest} onChange={(event) => onUpdateFolder(wf.folder.path, { output_dest: event.target.value })}>
+                    <option value="beside">源文件旁</option>
+                    <option value="subfolder">av1 子目录</option>
+                    <option value="custom">自定义目录</option>
+                  </select>
+                </label>
+                <button className="icon-btn danger" title="删除" onClick={() => onRemoveWatchFolder(wf.folder.path)}><Trash2 size={16} /></button>
+              </div>
+              <div className="folder-route">
+                <FolderPathCard
+                  title={wf.folder.label || wf.folder.path}
+                  path={wf.folder.path}
+                  detail={`${wf.folder.file_count} 个视频 · ${formatSize(wf.folder.total_size)}`}
+                />
+                <div className="folder-route-arrow" aria-hidden="true"><ChevronRight size={19} /></div>
+                <FolderPathCard
+                  title={needsCustomOutput ? '选择目标目录' : outputPath.label}
+                  path={needsCustomOutput ? '点击选择转码输出位置' : outputPath.path}
+                  detail={outputPath.detail}
+                  action={wf.folder.output_dest === 'custom' ? () => onBrowseOutputFolder(wf.folder.path) : undefined}
+                  muted={needsCustomOutput}
+                />
+              </div>
+            </div>
+          );
+        })}
+        {!watchFolders.length && <div className="empty-state compact">尚未添加目录监控</div>}
       </div>
     </section>
   );
+}
+
+function FolderPathCard({ title, path, detail, action, muted = false }: { title: string; path: string; detail: string; action?: () => void; muted?: boolean }) {
+  const content = (
+    <>
+      <div className="folder-path-title"><Folder size={17} />{title}</div>
+      <div className="folder-path-value" title={path}>{path}</div>
+      <div className="folder-path-detail">{detail}</div>
+    </>
+  );
+  if (action) {
+    return (
+      <button type="button" className={`folder-path-card action ${muted ? 'muted' : ''}`} onClick={action}>
+        {content}
+      </button>
+    );
+  }
+  return <div className="folder-path-card">{content}</div>;
+}
+
+function outputFolderPath(folder: WatchFolder) {
+  if (folder.output_dest === 'subfolder') {
+    return { label: 'av1 子目录', path: `${folder.path}/av1`, detail: '输出到监控目录下的 av1 文件夹' };
+  }
+  if (folder.output_dest === 'custom') {
+    return {
+      label: folder.output_dir ? folderName(folder.output_dir) : '选择目标目录',
+      path: folder.output_dir || '点击选择转码输出位置',
+      detail: folder.output_dir ? '自定义输出目录' : '尚未选择目标目录',
+    };
+  }
+  return { label: folder.label || folderName(folder.path), path: folder.path, detail: '输出到源文件所在目录' };
 }
 
 function MetricCard({
@@ -1029,7 +1150,23 @@ function StatusChip({ tone, icon: Icon, label, value }: { tone: 'running' | 'upc
   );
 }
 
-function OnlinePage({ jobs, tasks, form, onUpload, onDownloadReport }: { jobs: OnlineJob[]; tasks: TaskInfo[]; form: TranscodeForm; onUpload: (files: File[]) => void; onDownloadReport: (taskID?: string) => void }) {
+function OnlinePage({
+  jobs,
+  tasks,
+  presets,
+  selectedPreset,
+  onPresetChange,
+  onUpload,
+  onDownloadReport,
+}: {
+  jobs: OnlineJob[];
+  tasks: TaskInfo[];
+  presets: Preset[];
+  selectedPreset: string;
+  onPresetChange: (name: string) => void;
+  onUpload: (files: File[]) => void;
+  onDownloadReport: (taskID?: string) => void;
+}) {
   const [dragging, setDragging] = useState(false);
   const taskByID = useMemo(() => new Map(tasks.map((task) => [task.task_id, task])), [tasks]);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1062,11 +1199,13 @@ function OnlinePage({ jobs, tasks, form, onUpload, onDownloadReport }: { jobs: O
       </div>
 
       <div className="online-settings-strip">
-        <span>当前参数</span>
-        <b>{form.encoder}</b>
-        <b>CRF {form.crf}</b>
-        <b>Preset {String(form.preset)}</b>
-        <b>{form.output_ext === 'auto' ? '自动格式' : form.output_ext}</b>
+        <label className="field online-preset-field">
+          <span>在线预设</span>
+          <select value={selectedPreset} onChange={(event) => onPresetChange(event.target.value)}>
+            <option value="">请选择预设</option>
+            {presets.map((preset) => <option key={preset.name} value={preset.name}>{preset.name}</option>)}
+          </select>
+        </label>
       </div>
 
       <div className="online-job-list">
@@ -1319,6 +1458,28 @@ function encoderKindLabel(encoder: string) {
   if (encoder.includes('qsv')) return 'Intel';
   if (encoder.includes('amf')) return 'AMD';
   return 'CPU';
+}
+
+const leaderboardEncoderOrder = ['libsvtav1', 'libaom-av1', 'librav1e', 'av1_qsv', 'av1_nvenc'];
+
+function sortEncoders(encoders: string[]) {
+  return [...encoders].sort(compareEncoders);
+}
+
+function compareEncoders(a: string, b: string) {
+  return encoderRank(a) - encoderRank(b) || a.localeCompare(b);
+}
+
+function encoderRank(encoder: string) {
+  const normalized = encoder.toLowerCase();
+  const index = leaderboardEncoderOrder.findIndex((item) => normalized === item || normalized.includes(item.replace('lib', '').replace('-', '')));
+  if (index >= 0) return index;
+  if (normalized.includes('svt')) return 0;
+  if (normalized.includes('aom')) return 1;
+  if (normalized.includes('rav1e')) return 2;
+  if (normalized.includes('qsv')) return 3;
+  if (normalized.includes('nvenc')) return 4;
+  return leaderboardEncoderOrder.length;
 }
 
 function bucketTasks(tasks: TaskInfo[], days: number, getValue: (task: TaskInfo) => number) {
@@ -1716,6 +1877,10 @@ function pathToB64(path: string) {
   let binary = '';
   bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
   return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function folderName(path: string) {
+  return path.replace(/\/+$/, '').split('/').pop() || path || '/';
 }
 
 function splitArgs(text: string) {

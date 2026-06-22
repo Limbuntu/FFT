@@ -40,6 +40,9 @@ func fillDarwin(info *models.SystemInfo) {
 	if out := run(5*time.Second, "sw_vers", "-productVersion"); out != "" {
 		info.OS = "Darwin " + out
 	}
+	if out := run(10*time.Second, "system_profiler", "SPHardwareDataType"); out != "" {
+		fillDarwinHardware(info, out)
+	}
 	if out := run(5*time.Second, "sysctl", "-n", "machdep.cpu.brand_string"); out != "" {
 		info.CPU = out
 	}
@@ -64,6 +67,33 @@ func fillDarwin(info *models.SystemInfo) {
 			if strings.HasPrefix(line, "Chipset Model:") || strings.HasPrefix(line, "Chip Model:") {
 				info.GPU = strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
 				break
+			}
+		}
+	}
+}
+
+func fillDarwinHardware(info *models.SystemInfo, out string) {
+	for _, line := range strings.Split(out, "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), ":")
+		if !ok {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		switch strings.TrimSpace(key) {
+		case "Chip", "Processor Name":
+			if value != "" && info.CPU == "Unknown" {
+				info.CPU = value
+			}
+		case "Memory":
+			if value != "" && info.Memory == "Unknown" {
+				info.Memory = value
+			}
+		case "Total Number of Cores":
+			if fields := strings.Fields(value); len(fields) > 0 {
+				if v, err := strconv.Atoi(fields[0]); err == nil {
+					info.Cores = v
+					info.Threads = v
+				}
 			}
 		}
 	}

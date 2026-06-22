@@ -32,6 +32,11 @@ type Broadcaster interface {
 	Broadcast(any)
 }
 
+type TaskStore interface {
+	SaveTranscodeTask(models.TaskInfo) error
+	TranscodeTasks() ([]models.TaskInfo, error)
+}
+
 type Service struct {
 	mu          sync.Mutex
 	tasks       map[string]*models.TaskInfo
@@ -39,16 +44,20 @@ type Service struct {
 	partials    map[string]string
 	durations   map[string]float64
 	broadcaster Broadcaster
+	store       TaskStore
 }
 
-func New(broadcaster Broadcaster) *Service {
-	return &Service{
+func New(broadcaster Broadcaster, store TaskStore) *Service {
+	s := &Service{
 		tasks:       map[string]*models.TaskInfo{},
 		cancels:     map[string]context.CancelFunc{},
 		partials:    map[string]string{},
 		durations:   map[string]float64{},
 		broadcaster: broadcaster,
+		store:       store,
 	}
+	s.loadPersistedTasks()
+	return s
 }
 
 func (s *Service) Start(req models.TranscodeRequest) (models.TaskInfo, error) {
@@ -73,6 +82,7 @@ func (s *Service) Start(req models.TranscodeRequest) (models.TaskInfo, error) {
 	s.mu.Lock()
 	s.tasks[task.TaskID] = task
 	s.mu.Unlock()
+	s.persist(task.TaskID)
 
 	go s.run(task.TaskID)
 	return cloneTask(task), nil
@@ -100,6 +110,7 @@ func (s *Service) Cancel(taskID string) bool {
 			log.Printf("remove partial output failed %s: %v", partial, err)
 		}
 	}
+	s.persist(taskID)
 	s.notify(taskID)
 	return true
 }
@@ -323,21 +334,46 @@ func (p *progressTracker) Tail() string {
 	defer p.mu.Unlock()
 	for i := len(p.lines) - 1; i >= 0; i-- {
 		line := p.lines[i]
-		if line == "" || strings.HasPrefix(line, "frame=") {
+		if isFFmpegErrorLine(line) {
+			return trimFFmpegDetail(line)
+		}
+	}
+	for i := len(p.lines) - 1; i >= 0; i-- {
+		line := p.lines[i]
+		if line == "" || strings.HasPrefix(line, "frame=") || strings.HasPrefix(line, "Duration:") || strings.Contains(line, "vendor_id") {
 			continue
 		}
-		if len(line) > 500 {
-			return line[len(line)-500:]
-		}
-		return line
+		return trimFFmpegDetail(line)
 	}
 	return ""
+}
+
+func isFFmpegErrorLine(line string) bool {
+	lower := strings.ToLower(line)
+	for _, marker := range []string{"error", "denied", "not permitted", "invalid data", "unable", "failed", "no such file", "permission"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func trimFFmpegDetail(line string) string {
+	if len(line) > 500 {
+		return line[len(line)-500:]
+	}
+	return line
 }
 
 func (s *Service) fail(taskID, message string) {
 	s.update(taskID, func(t *models.TaskInfo) {
 		t.Status = models.TaskFailed
 		t.Message = message
+		t.Progress = 100
+		t.FinishedAt = time.Now()
+		t.DurationSec = t.FinishedAt.Sub(t.CreatedAt).Seconds()
+		t.ETA = "失败"
+		t.ETASeconds = 0
 	})
 	s.notify(taskID)
 }
@@ -358,9 +394,14 @@ func (s *Service) broadcast(v any) {
 
 func (s *Service) update(taskID string, fn func(*models.TaskInfo)) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	var snapshot models.TaskInfo
 	if task := s.tasks[taskID]; task != nil {
 		fn(task)
+		snapshot = cloneTask(task)
+	}
+	s.mu.Unlock()
+	if snapshot.TaskID != "" {
+		s.saveTask(snapshot)
 	}
 }
 
@@ -391,6 +432,51 @@ func (s *Service) setPartial(taskID, path string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.partials[taskID] = path
+}
+
+func (s *Service) loadPersistedTasks() {
+	if s.store == nil {
+		return
+	}
+	tasks, err := s.store.TranscodeTasks()
+	if err != nil {
+		log.Printf("load transcode tasks failed: %v", err)
+		return
+	}
+	for i := range tasks {
+		task := tasks[i]
+		if task.Status == models.TaskRunning || task.Status == models.TaskPending {
+			task.Status = models.TaskFailed
+			task.Message = "后端重启，任务已中断"
+			task.Progress = 100
+			if task.FinishedAt.IsZero() {
+				task.FinishedAt = time.Now()
+			}
+			task.DurationSec = task.FinishedAt.Sub(task.CreatedAt).Seconds()
+			task.ETA = "已中断"
+			task.ETASeconds = 0
+			s.saveTask(task)
+		}
+		cloned := cloneTask(&task)
+		s.tasks[cloned.TaskID] = &cloned
+	}
+}
+
+func (s *Service) persist(taskID string) {
+	task := s.get(taskID)
+	if task == nil {
+		return
+	}
+	s.saveTask(*task)
+}
+
+func (s *Service) saveTask(task models.TaskInfo) {
+	if s.store == nil {
+		return
+	}
+	if err := s.store.SaveTranscodeTask(task); err != nil {
+		log.Printf("save transcode task %s failed: %v", task.TaskID, err)
+	}
 }
 
 func cloneTask(task *models.TaskInfo) models.TaskInfo {
