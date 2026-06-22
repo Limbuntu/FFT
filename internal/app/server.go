@@ -1,17 +1,21 @@
 package app
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -77,6 +81,7 @@ func (s *Server) routes(r *gin.Engine) {
 	apiGroup.POST("/files/folder", api.CreateFolder)
 	apiGroup.GET("/watchfolders", s.listWatchFolders)
 	apiGroup.POST("/watchfolders", s.addWatchFolder)
+	apiGroup.GET("/watchfolders/:path/manage", s.manageWatchFolder)
 	apiGroup.PATCH("/watchfolders/:path", s.updateWatchFolder)
 	apiGroup.DELETE("/watchfolders/:path", s.removeWatchFolder)
 	apiGroup.POST("/watchfolders/scan", s.listWatchFolders)
@@ -170,6 +175,8 @@ func (s *Server) addWatchFolder(c *gin.Context) {
 type updateWatchFolderReq struct {
 	OutputDest *string `json:"output_dest"`
 	OutputDir  *string `json:"output_dir"`
+	Path       *string `json:"path"`
+	Label      *string `json:"label"`
 }
 
 func (s *Server) updateWatchFolder(c *gin.Context) {
@@ -183,10 +190,34 @@ func (s *Server) updateWatchFolder(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	record, err := s.db.UpdateWatchFolder(path, req.OutputDest, req.OutputDir)
+	var record fftdb.WatchFolderRecord
+	var err error
+	if req.Path != nil {
+		newPath := strings.TrimSpace(*req.Path)
+		if newPath == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Path is required"})
+			return
+		}
+		abs, absErr := filepath.Abs(newPath)
+		if absErr != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid path"})
+			return
+		}
+		if st, statErr := os.Stat(abs); statErr != nil || !st.IsDir() {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Path is not a directory"})
+			return
+		}
+		record, err = s.db.MoveWatchFolder(path, abs)
+	} else {
+		record, err = s.db.UpdateWatchFolder(path, req.OutputDest, req.OutputDir, req.Label)
+	}
 	if err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Watch folder not found"})
+			return
+		}
+		if strings.Contains(err.Error(), "already exists") {
+			c.JSON(http.StatusConflict, gin.H{"error": "Watch folder already exists"})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -216,6 +247,106 @@ func (s *Server) removeWatchFolder(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
+}
+
+func (s *Server) manageWatchFolder(c *gin.Context) {
+	path, ok := decodePath(c.Param("path"))
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid base64 path"})
+		return
+	}
+	record, err := s.db.WatchFolder(path)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Watch folder not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	files := watchfolders.ScanFolder(record.Path)
+	tasks := s.transcoder.Tasks()
+	items := make([]models.ManagedFileItem, 0, len(files))
+	targetRoot := targetRootFor(record)
+	var sourceSize, targetSize int64
+	for _, file := range files {
+		sourceSize += file.Size
+		relPath := relativePath(record.Path, file.Path)
+		relDir := filepath.Dir(relPath)
+		if relDir == "." {
+			relDir = ""
+		}
+		target := targetPathFor(record, file.Path)
+		var targetErr error
+		var targetFileName string
+		var targetRelativePath string
+		targetExists := false
+		var targetFileSize int64
+		if target != "" {
+			targetFileName = filepath.Base(target)
+			targetRelativePath = targetFileName
+			var targetInfo os.FileInfo
+			targetInfo, targetErr = os.Stat(target)
+			targetExists = targetErr == nil && !targetInfo.IsDir()
+			if targetExists {
+				targetFileSize = targetInfo.Size()
+				targetSize += targetFileSize
+			}
+		}
+		sourceMeta := probeMediaMeta(file.Path)
+		targetMeta := probeMediaMeta(target)
+		status, message := managedStatus(file.Size, targetFileSize, targetExists, targetErr)
+		if isAV1Codec(sourceMeta.VideoCodec) {
+			status = "keep"
+			message = "源文件已是 AV1"
+		} else if target == "" {
+			message = "尚未设置输出方式"
+		}
+		if targetExists && targetMeta.ProbeFailed {
+			status = "force"
+			message = "目标文件无法识别，可能已损坏"
+		}
+		items = append(items, models.ManagedFileItem{
+			ID:      pathID(file.Path),
+			Status:  status,
+			Message: message,
+			Source: models.ManagedFileSide{
+				Name:         file.Name,
+				Path:         file.Path,
+				RelativeDir:  relDir,
+				RelativePath: relPath,
+				Size:         file.Size,
+				Exists:       true,
+				Meta:         sourceMeta,
+			},
+			Target: models.ManagedFileSide{
+				Name:         targetFileName,
+				Path:         target,
+				RelativeDir:  relDir,
+				RelativePath: targetRelativePath,
+				Size:         targetFileSize,
+				Exists:       targetExists,
+				Meta:         targetMeta,
+			},
+		})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return strings.ToLower(items[i].Source.RelativePath) < strings.ToLower(items[j].Source.RelativePath)
+	})
+
+	c.JSON(http.StatusOK, models.ManagedFolderResponse{
+		Folder: models.WatchFolder{
+			Path:       record.Path,
+			Label:      record.Label,
+			FileCount:  len(files),
+			TotalSize:  sourceSize,
+			OutputDest: record.OutputDest,
+			OutputDir:  record.OutputDir,
+		},
+		Summary: managedSummary(record, tasks, len(files), sourceSize, targetSize, targetRoot),
+		Items:   items,
+	})
 }
 
 func (s *Server) hardwareInfo(c *gin.Context) {
@@ -457,6 +588,220 @@ func decodePath(value string) (string, bool) {
 		return "", false
 	}
 	return string(data), true
+}
+
+func pathID(path string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(path))
+}
+
+func relativePath(root, path string) string {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return filepath.Base(path)
+	}
+	return rel
+}
+
+func targetRootFor(folder fftdb.WatchFolderRecord) string {
+	switch folder.OutputDest {
+	case "subfolder":
+		return filepath.Join(folder.Path, "AV1")
+	case "custom":
+		if folder.OutputDir != "" {
+			return folder.OutputDir
+		}
+	case "beside":
+		return folder.Path
+	}
+	return ""
+}
+
+func targetPathFor(folder fftdb.WatchFolderRecord, sourcePath string) string {
+	if folder.OutputDest == "" {
+		return ""
+	}
+	sourceDir := filepath.Dir(sourcePath)
+	sourceBase := strings.TrimSuffix(filepath.Base(sourcePath), filepath.Ext(sourcePath))
+	relDir := filepath.Dir(relativePath(folder.Path, sourcePath))
+	if relDir == "." {
+		relDir = ""
+	}
+	ext := filepath.Ext(sourcePath)
+	if incompatibleManagedExts[strings.ToLower(ext)] {
+		ext = ".mp4"
+	}
+	name := sourceBase + "_av1" + ext
+	switch folder.OutputDest {
+	case "subfolder":
+		name = flattenedOutputStem(relDir, sourceBase) + "_av1" + ext
+		return filepath.Join(folder.Path, "AV1", name)
+	case "custom":
+		if folder.OutputDir != "" {
+			name = flattenedOutputStem(relDir, sourceBase) + "_av1" + ext
+			return filepath.Join(folder.OutputDir, name)
+		}
+	}
+	return filepath.Join(sourceDir, name)
+}
+
+var incompatibleManagedExts = map[string]bool{
+	".mov": true, ".avi": true, ".wmv": true, ".flv": true,
+	".ts": true, ".mpg": true, ".mpeg": true,
+}
+
+func flattenedOutputStem(relDir, stem string) string {
+	relDir = strings.Trim(relDir, string(filepath.Separator))
+	if relDir == "" {
+		return stem
+	}
+	parts := strings.Split(filepath.ToSlash(relDir), "/")
+	clean := make([]string, 0, len(parts)+1)
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" && part != "." {
+			clean = append(clean, part)
+		}
+	}
+	clean = append(clean, stem)
+	return strings.Join(clean, "_")
+}
+
+func managedStatus(sourceSize, targetSize int64, targetExists bool, targetErr error) (string, string) {
+	if !targetExists {
+		if targetErr != nil && !errors.Is(targetErr, os.ErrNotExist) {
+			return "force", "目标文件无法读取"
+		}
+		return "add", "右侧尚无 AV1 文件"
+	}
+	if targetSize <= 0 || targetSize < sourceSize/100 {
+		return "force", "目标文件可能是半成品"
+	}
+	return "keep", "目标文件已存在"
+}
+
+func managedSummary(folder fftdb.WatchFolderRecord, tasks []models.TaskInfo, fileCount int, sourceSize, targetSize int64, targetRoot string) models.ManagedFolderSummary {
+	summary := models.ManagedFolderSummary{
+		Name:       folder.Label,
+		Source:     folder.Path,
+		Target:     targetRoot,
+		FileCount:  fileCount,
+		SourceSize: sourceSize,
+		TargetSize: targetSize,
+	}
+	if summary.Name == "" {
+		summary.Name = filepath.Base(folder.Path)
+	}
+	var created, finished time.Time
+	for _, task := range tasks {
+		if !taskTouchesFolder(task, folder.Path) {
+			continue
+		}
+		if created.IsZero() || task.CreatedAt.Before(created) {
+			created = task.CreatedAt
+		}
+		if task.Status == models.TaskRunning || task.Status == models.TaskPending {
+			if task.Progress > summary.Progress {
+				summary.Progress = task.Progress
+				summary.ActiveTaskID = task.TaskID
+			}
+		}
+		if !task.FinishedAt.IsZero() && task.FinishedAt.After(finished) {
+			finished = task.FinishedAt
+		}
+		summary.DurationSec += task.DurationSec
+	}
+	if !created.IsZero() {
+		value := created.Format(time.RFC3339)
+		summary.CreatedAt = &value
+	}
+	if !finished.IsZero() {
+		value := finished.Format(time.RFC3339)
+		summary.FinishedAt = &value
+	}
+	return summary
+}
+
+func taskTouchesFolder(task models.TaskInfo, folderPath string) bool {
+	for _, file := range task.Request.Files {
+		if file == folderPath || strings.HasPrefix(file, folderPath+string(os.PathSeparator)) {
+			return true
+		}
+	}
+	for _, result := range task.Results {
+		if result.InputPath == folderPath || strings.HasPrefix(result.InputPath, folderPath+string(os.PathSeparator)) {
+			return true
+		}
+	}
+	return false
+}
+
+type ffprobeOutput struct {
+	Streams []struct {
+		CodecType string `json:"codec_type"`
+		CodecName string `json:"codec_name"`
+		Width     int    `json:"width"`
+		Height    int    `json:"height"`
+		Channels  int    `json:"channels"`
+	} `json:"streams"`
+	Format struct {
+		BitRate string `json:"bit_rate"`
+	} `json:"format"`
+}
+
+func probeMediaMeta(path string) models.ManagedFileMeta {
+	if path == "" {
+		return models.ManagedFileMeta{}
+	}
+	if _, err := os.Stat(path); err != nil {
+		return models.ManagedFileMeta{}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", path)
+	out, err := cmd.Output()
+	if err != nil {
+		return models.ManagedFileMeta{ProbeFailed: true}
+	}
+	var parsed ffprobeOutput
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		return models.ManagedFileMeta{ProbeFailed: true}
+	}
+	var meta models.ManagedFileMeta
+	meta.Bitrate = parseInt64(parsed.Format.BitRate)
+	for _, stream := range parsed.Streams {
+		switch stream.CodecType {
+		case "video":
+			if meta.VideoCodec == "" {
+				meta.VideoCodec = stream.CodecName
+				if stream.Width > 0 && stream.Height > 0 {
+					meta.Resolution = fmt.Sprintf("%dx%d", stream.Width, stream.Height)
+				}
+			}
+		case "audio":
+			if meta.AudioCodec == "" {
+				meta.AudioCodec = stream.CodecName
+				meta.Channels = stream.Channels
+			}
+		}
+	}
+	return meta
+}
+
+func isAV1Codec(codec string) bool {
+	codec = strings.ToLower(strings.TrimSpace(codec))
+	return codec == "av1" || codec == "libsvtav1" || codec == "libaom-av1" || codec == "librav1e"
+}
+
+func parseInt64(value string) int64 {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "N/A" {
+		return 0
+	}
+	var parsed int64
+	if _, err := fmt.Sscanf(value, "%d", &parsed); err != nil {
+		return 0
+	}
+	return parsed
 }
 
 func formInt(c *gin.Context, key string, fallback int) int {

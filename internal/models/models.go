@@ -210,6 +210,53 @@ type WatchFolderScanResult struct {
 	Files  []FileEntry `json:"files"`
 }
 
+type ManagedFileMeta struct {
+	VideoCodec  string `json:"video_codec"`
+	AudioCodec  string `json:"audio_codec"`
+	Channels    int    `json:"channels"`
+	Resolution  string `json:"resolution"`
+	Bitrate     int64  `json:"bitrate"`
+	ProbeFailed bool   `json:"probe_failed"`
+}
+
+type ManagedFileSide struct {
+	Name         string          `json:"name"`
+	Path         string          `json:"path"`
+	RelativeDir  string          `json:"relative_dir"`
+	RelativePath string          `json:"relative_path"`
+	Size         int64           `json:"size"`
+	Exists       bool            `json:"exists"`
+	Meta         ManagedFileMeta `json:"meta"`
+}
+
+type ManagedFileItem struct {
+	ID      string          `json:"id"`
+	Status  string          `json:"status"`
+	Source  ManagedFileSide `json:"source"`
+	Target  ManagedFileSide `json:"target"`
+	Message string          `json:"message"`
+}
+
+type ManagedFolderSummary struct {
+	Name         string  `json:"name"`
+	Source       string  `json:"source"`
+	Target       string  `json:"target"`
+	FileCount    int     `json:"file_count"`
+	SourceSize   int64   `json:"source_size"`
+	TargetSize   int64   `json:"target_size"`
+	CreatedAt    *string `json:"created_at"`
+	FinishedAt   *string `json:"finished_at"`
+	DurationSec  float64 `json:"duration_sec"`
+	Progress     float64 `json:"progress"`
+	ActiveTaskID string  `json:"active_task_id"`
+}
+
+type ManagedFolderResponse struct {
+	Folder  WatchFolder          `json:"folder"`
+	Summary ManagedFolderSummary `json:"summary"`
+	Items   []ManagedFileItem    `json:"items"`
+}
+
 type SystemInfo struct {
 	OS      string `json:"os"`
 	CPU     string `json:"cpu"`

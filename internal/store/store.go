@@ -4,8 +4,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/limbuntu/fft/internal/models"
@@ -50,7 +52,7 @@ func (d *DB) Migrate() error {
 		`CREATE TABLE IF NOT EXISTS watch_folders (
 			path TEXT PRIMARY KEY,
 			label TEXT NOT NULL DEFAULT '',
-			output_dest TEXT NOT NULL DEFAULT 'beside',
+			output_dest TEXT NOT NULL DEFAULT '',
 			output_dir TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
@@ -117,7 +119,7 @@ func (d *DB) ImportLegacyJSON(root string) error {
 }
 
 func (d *DB) WatchFolders() ([]WatchFolderRecord, error) {
-	rows, err := d.db.Query(`SELECT path, label, output_dest, output_dir FROM watch_folders ORDER BY label, path`)
+	rows, err := d.db.Query(`SELECT path, label, output_dest, output_dir FROM watch_folders ORDER BY created_at, rowid`)
 	if err != nil {
 		return nil, err
 	}
@@ -139,9 +141,6 @@ func (d *DB) AddWatchFolder(path, label, outputDest, outputDir string) (WatchFol
 	if label == "" {
 		label = filepath.Base(path)
 	}
-	if outputDest == "" {
-		outputDest = "beside"
-	}
 	_, err := d.db.Exec(
 		`INSERT OR IGNORE INTO watch_folders(path, label, output_dest, output_dir, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
@@ -162,10 +161,16 @@ func (d *DB) WatchFolder(path string) (WatchFolderRecord, error) {
 	return r, err
 }
 
-func (d *DB) UpdateWatchFolder(path string, outputDest, outputDir *string) (WatchFolderRecord, error) {
+func (d *DB) UpdateWatchFolder(path string, outputDest, outputDir, label *string) (WatchFolderRecord, error) {
 	current, err := d.WatchFolder(path)
 	if err != nil {
 		return WatchFolderRecord{}, err
+	}
+	if label != nil {
+		current.Label = strings.TrimSpace(*label)
+		if current.Label == "" {
+			current.Label = filepath.Base(path)
+		}
 	}
 	if outputDest != nil {
 		current.OutputDest = *outputDest
@@ -174,13 +179,40 @@ func (d *DB) UpdateWatchFolder(path string, outputDest, outputDir *string) (Watc
 		current.OutputDir = *outputDir
 	}
 	_, err = d.db.Exec(
-		`UPDATE watch_folders SET output_dest = ?, output_dir = ?, updated_at = ? WHERE path = ?`,
-		current.OutputDest, current.OutputDir, time.Now().Format(time.RFC3339Nano), path,
+		`UPDATE watch_folders SET label = ?, output_dest = ?, output_dir = ?, updated_at = ? WHERE path = ?`,
+		current.Label, current.OutputDest, current.OutputDir, time.Now().Format(time.RFC3339Nano), path,
 	)
 	if err != nil {
 		return WatchFolderRecord{}, err
 	}
 	return current, nil
+}
+
+func (d *DB) MoveWatchFolder(oldPath, newPath string) (WatchFolderRecord, error) {
+	current, err := d.WatchFolder(oldPath)
+	if err != nil {
+		return WatchFolderRecord{}, err
+	}
+	if current.Path == newPath {
+		return current, nil
+	}
+	if _, err := d.WatchFolder(newPath); err == nil {
+		return WatchFolderRecord{}, fmt.Errorf("watch folder already exists")
+	} else if err != sql.ErrNoRows {
+		return WatchFolderRecord{}, err
+	}
+	label := filepath.Base(newPath)
+	if label == "." || label == string(filepath.Separator) || label == "" {
+		label = newPath
+	}
+	_, err = d.db.Exec(
+		`UPDATE watch_folders SET path = ?, label = ?, updated_at = ? WHERE path = ?`,
+		newPath, label, time.Now().Format(time.RFC3339Nano), oldPath,
+	)
+	if err != nil {
+		return WatchFolderRecord{}, err
+	}
+	return d.WatchFolder(newPath)
 }
 
 func (d *DB) RemoveWatchFolder(path string) (bool, error) {

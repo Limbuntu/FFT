@@ -28,6 +28,17 @@ var incompatibleAV1Exts = map[string]bool{
 	".ts": true, ".mpg": true, ".mpeg": true,
 }
 
+var qsvPresetMap = map[string]string{
+	"veryslow":  "0",
+	"slower":    "1",
+	"slow":      "2",
+	"medium":    "3",
+	"fast":      "4",
+	"faster":    "5",
+	"veryfast":  "6",
+	"ultrafast": "7",
+}
+
 type Broadcaster interface {
 	Broadcast(any)
 }
@@ -561,6 +572,7 @@ func buildOutputPath(src string, req models.TranscodeRequest) (string, bool, str
 	fileOutput := req.FileOutputs[src]
 	dest := req.OutputDest
 	dir := req.OutputDir
+	suffix := req.Suffix
 	if fileOutput != nil {
 		if value := fileOutput["output_dest"]; value != "" {
 			dest = value
@@ -568,12 +580,15 @@ func buildOutputPath(src string, req models.TranscodeRequest) (string, bool, str
 		if value := fileOutput["output_dir"]; value != "" {
 			dir = value
 		}
+		if value := fileOutput["suffix"]; value != "" {
+			suffix = value
+		}
 	}
 
 	outDir := filepath.Dir(src)
 	switch dest {
 	case "subfolder":
-		outDir = filepath.Join(filepath.Dir(src), "av1")
+		outDir = filepath.Join(filepath.Dir(src), "AV1")
 	case "custom":
 		if dir != "" {
 			outDir = dir
@@ -583,7 +598,7 @@ func buildOutputPath(src string, req models.TranscodeRequest) (string, bool, str
 	if ext == "" {
 		ext = ".mkv"
 	}
-	return filepath.Join(outDir, filepath.Base(base)+req.Suffix+ext), changed, originalExt, nil
+	return filepath.Join(outDir, filepath.Base(base)+suffix+ext), changed, originalExt, nil
 }
 
 func buildFFmpegArgs(src, dst string, req models.TranscodeRequest) []string {
@@ -598,7 +613,7 @@ func buildFFmpegArgs(src, dst string, req models.TranscodeRequest) []string {
 	case "av1_nvenc":
 		args = append(args, "-cq", fmt.Sprint(req.CRF), "-preset", "p5")
 	case "av1_qsv":
-		args = append(args, "-global_quality", fmt.Sprint(req.CRF), "-preset", "medium")
+		args = append(args, "-global_quality", fmt.Sprint(req.CRF), "-preset", qsvPresetValue(req.Preset))
 	case "av1_amf":
 		args = append(args, "-quality", fmt.Sprint(req.CRF), "-usage", "transcoding")
 	}
@@ -606,6 +621,14 @@ func buildFFmpegArgs(src, dst string, req models.TranscodeRequest) []string {
 	args = append(args, req.ExtraArgs...)
 	args = append(args, dst)
 	return args
+}
+
+func qsvPresetValue(preset models.PresetValue) string {
+	value := strings.ToLower(strings.TrimSpace(preset.String()))
+	if mapped, ok := qsvPresetMap[value]; ok {
+		return mapped
+	}
+	return value
 }
 
 func probeDuration(file string) float64 {

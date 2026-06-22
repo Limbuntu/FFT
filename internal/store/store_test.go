@@ -73,3 +73,39 @@ func TestTranscodeTaskPersistence(t *testing.T) {
 		t.Fatalf("restored times mismatch: %s %s", got.CreatedAt, got.FinishedAt)
 	}
 }
+
+func TestWatchFoldersKeepInsertionOrderAndUpdateLabel(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "fft.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := db.AddWatchFolder("/tmp/z-last-by-name", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AddWatchFolder("/tmp/a-first-by-name", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	label := "素材备忘"
+	if _, err := db.UpdateWatchFolder("/tmp/z-last-by-name", nil, nil, &label); err != nil {
+		t.Fatal(err)
+	}
+
+	folders, err := db.WatchFolders()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(folders) != 2 {
+		t.Fatalf("got %d folders, want 2", len(folders))
+	}
+	if folders[0].Path != "/tmp/z-last-by-name" || folders[1].Path != "/tmp/a-first-by-name" {
+		t.Fatalf("watch folders not in insertion order: %+v", folders)
+	}
+	if folders[0].Label != label {
+		t.Fatalf("label = %q, want %q", folders[0].Label, label)
+	}
+}
