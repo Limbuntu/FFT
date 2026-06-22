@@ -1,11 +1,19 @@
 package app
 
 import (
+	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/limbuntu/fft/internal/api"
@@ -14,6 +22,7 @@ import (
 	"github.com/limbuntu/fft/internal/hardware"
 	"github.com/limbuntu/fft/internal/models"
 	"github.com/limbuntu/fft/internal/presets"
+	taskreport "github.com/limbuntu/fft/internal/report"
 	fftdb "github.com/limbuntu/fft/internal/store"
 	"github.com/limbuntu/fft/internal/sysinfo"
 	"github.com/limbuntu/fft/internal/transcode"
@@ -76,7 +85,10 @@ func (s *Server) routes(r *gin.Engine) {
 
 	apiGroup.POST("/transcode", s.startTranscode)
 	apiGroup.DELETE("/transcode/:task_id", s.cancelTranscode)
+	apiGroup.GET("/transcode/:task_id/report.pdf", s.downloadTaskReport)
 	apiGroup.GET("/tasks", func(c *gin.Context) { c.JSON(http.StatusOK, s.transcoder.Tasks()) })
+	apiGroup.POST("/online/transcode", s.startOnlineTranscode)
+	apiGroup.GET("/online/download/:task_id", s.downloadOnlineResult)
 
 	apiGroup.GET("/benchmark/history", s.benchmarkHistory)
 	apiGroup.POST("/benchmark", s.runBenchmark)
@@ -98,6 +110,10 @@ func (s *Server) routes(r *gin.Engine) {
 }
 
 func (s *Server) index(c *gin.Context) {
+	if strings.HasPrefix(c.Request.URL.Path, "/api/") {
+		c.JSON(http.StatusNotFound, gin.H{"error": "API endpoint not found"})
+		return
+	}
 	index := filepath.Join(s.cfg.StaticDir, "index.html")
 	if _, err := os.Stat(index); err != nil {
 		c.String(http.StatusOK, "FFT backend is running. Build the React frontend with npm run build in frontend/.")
@@ -228,6 +244,126 @@ func (s *Server) cancelTranscode(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "cancelled"})
 }
 
+func (s *Server) downloadTaskReport(c *gin.Context) {
+	task, ok := s.transcoder.Task(c.Param("task_id"))
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Task not found"})
+		return
+	}
+	pdf, filename, err := taskreport.GenerateTaskPDF(task)
+	if err != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+	c.Data(http.StatusOK, "application/pdf", pdf)
+}
+
+func (s *Server) startOnlineTranscode(c *gin.Context) {
+	file, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "File is required"})
+		return
+	}
+
+	jobID := randomName("online")
+	jobDir := filepath.Join(s.cfg.CacheDir, jobID)
+	inputDir := filepath.Join(jobDir, "input")
+	outputDir := filepath.Join(jobDir, "output")
+	if err := os.MkdirAll(inputDir, 0o755); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	inputPath := filepath.Join(inputDir, safeFilename(file.Filename))
+	src, err := file.Open()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer src.Close()
+	dst, err := os.Create(inputPath)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if _, err := io.Copy(dst, src); err != nil {
+		_ = dst.Close()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if err := dst.Close(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	req := models.TranscodeRequest{
+		Files:      []string{inputPath},
+		Encoder:    c.DefaultPostForm("encoder", "libsvtav1"),
+		CRF:        formInt(c, "crf", 28),
+		Preset:     models.PresetValue(c.DefaultPostForm("preset", "8")),
+		Suffix:     c.DefaultPostForm("suffix", "_av1"),
+		OutputExt:  c.DefaultPostForm("output_ext", "auto"),
+		OutputDest: "custom",
+		OutputDir:  outputDir,
+		ExtraArgs:  strings.Fields(c.PostForm("extra_args")),
+	}
+	task, err := s.transcoder.Start(req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"task_id":      task.TaskID,
+		"filename":     file.Filename,
+		"download_url": "/api/online/download/" + task.TaskID,
+	})
+}
+
+func (s *Server) downloadOnlineResult(c *gin.Context) {
+	taskID := c.Param("task_id")
+	task, ok := s.transcoder.Task(taskID)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Task not found"})
+		return
+	}
+	if task.Status != models.TaskDone {
+		c.JSON(http.StatusConflict, gin.H{"error": "Task is not finished"})
+		return
+	}
+	if task.OutputPath == "" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Output file not found"})
+		return
+	}
+	outputPath, err := filepath.Abs(task.OutputPath)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid output path"})
+		return
+	}
+	cacheDir, err := filepath.Abs(s.cfg.CacheDir)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if outputPath != cacheDir && !strings.HasPrefix(outputPath, cacheDir+string(os.PathSeparator)) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Output file is not in cache"})
+		return
+	}
+	if _, err := os.Stat(outputPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Output file not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.FileAttachment(outputPath, filepath.Base(outputPath))
+}
+
 func (s *Server) benchmarkHistory(c *gin.Context) {
 	history, err := s.bench.History()
 	if err != nil {
@@ -320,4 +456,43 @@ func decodePath(value string) (string, bool) {
 		return "", false
 	}
 	return string(data), true
+}
+
+func formInt(c *gin.Context, key string, fallback int) int {
+	value := strings.TrimSpace(c.PostForm(key))
+	if value == "" {
+		return fallback
+	}
+	var parsed int
+	if _, err := fmt.Sscanf(value, "%d", &parsed); err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func safeFilename(name string) string {
+	base := strings.TrimSpace(filepath.Base(name))
+	if base == "." || base == string(os.PathSeparator) || base == "" {
+		return "upload"
+	}
+	re := regexp.MustCompile(`[^A-Za-z0-9._-]+`)
+	ext := filepath.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
+	cleanStem := strings.Trim(re.ReplaceAllString(stem, "_"), "._-")
+	cleanExt := strings.Trim(re.ReplaceAllString(ext, "_"), "_-")
+	if cleanStem == "" {
+		cleanStem = "upload"
+	}
+	if cleanExt == "" && ext != "" {
+		cleanExt = ".bin"
+	}
+	return cleanStem + cleanExt
+}
+
+func randomName(prefix string) string {
+	var buf [4]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
+	}
+	return fmt.Sprintf("%s-%s-%s", prefix, time.Now().Format("20060102-150405"), hex.EncodeToString(buf[:]))
 }

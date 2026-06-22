@@ -13,6 +13,7 @@ data/
 fft.db
 *.db
 logs/
+cache/
 
 # Build artifacts
 build/

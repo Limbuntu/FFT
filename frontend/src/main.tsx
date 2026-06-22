@@ -5,11 +5,14 @@ import {
   BarChart3,
   Check,
   ChevronLeft,
+  ChevronRight,
   CircleCheck,
   CircleX,
   Clock3,
+  CloudUpload,
   Cpu,
   Download,
+  FileDown,
   FileText,
   FileVideo,
   Folder,
@@ -23,7 +26,6 @@ import {
   Plus,
   RefreshCw,
   Save,
-  Settings,
   Square,
   Sun,
   Trash2,
@@ -31,7 +33,7 @@ import {
 } from 'lucide-react';
 import './styles.css';
 
-type Tab = 'console' | 'transcode' | 'benchmark' | 'presets';
+type Tab = 'console' | 'online' | 'transcode' | 'benchmark' | 'presets' | 'system';
 type BenchView = 'leaderboard' | 'test' | 'history';
 type Theme = 'light' | 'dark';
 
@@ -98,6 +100,15 @@ type TaskInfo = {
   message: string;
   output_path: string;
   created_at: string;
+  finished_at?: string;
+  duration_sec?: number;
+  results?: {
+    input_path: string;
+    output_path: string;
+    original_size: number;
+    output_size: number;
+    duration_sec: number;
+  }[];
 };
 
 type BenchmarkResult = {
@@ -148,13 +159,26 @@ type Toast = {
   type: 'info' | 'success' | 'error';
 };
 
+type OnlineJob = {
+  id: string;
+  name: string;
+  size: number;
+  task_id?: string;
+  download_url?: string;
+  status: string;
+  progress: number;
+  message: string;
+};
+
 const emptyBrowser: FileBrowser = { current: '/', parent: null, entries: [] };
 const defaultForm: TranscodeForm = { encoder: 'libsvtav1', crf: 28, preset: 8, suffix: '_av1', output_ext: 'auto' };
 const navItems: { id: Tab; label: string; description: string; icon: typeof Activity }[] = [
   { id: 'console', label: '控制台', description: '查看处理概览和运行状态', icon: LayoutDashboard },
+  { id: 'online', label: '在线调用', description: '拖拽上传文件并在浏览器下载转码结果', icon: CloudUpload },
   { id: 'transcode', label: '转码', description: '监控目录、选择文件并管理转码任务', icon: FileVideo },
   { id: 'benchmark', label: '跑分', description: '测试编码器性能并查看本机记录', icon: BarChart3 },
   { id: 'presets', label: '预设', description: '维护常用编码参数和输出格式', icon: Save },
+  { id: 'system', label: '系统信息', description: '查看硬件信息和支持的转码方式', icon: Cpu },
 ];
 
 function App() {
@@ -176,6 +200,7 @@ function App() {
   const [hardware, setHardware] = useState<HardwareReport>({ encoders: [], ffmpeg_version: '' });
   const [hwLoading, setHwLoading] = useState(false);
   const [tasks, setTasks] = useState<TaskInfo[]>([]);
+  const [onlineJobs, setOnlineJobs] = useLocalStorage<OnlineJob[]>('fft_online_jobs', []);
   const [form, setForm] = useLocalStorage<TranscodeForm>('fft_transcode_form', defaultForm);
   const [selectedPreset, setSelectedPreset] = useLocalStorage('fft_last_preset', '');
 
@@ -192,7 +217,7 @@ function App() {
   const [presets, setPresets] = useState<Preset[]>([]);
   const [editingPreset, setEditingPreset] = useState<string | null>(null);
   const [editPreset, setEditPreset] = useState({ encoder: 'libsvtav1', crf: 28, preset: 8 as number | string, extra_args: '' });
-  const [newPreset, setNewPreset] = useState({ name: '', encoder: 'libsvtav1', crf: 28, preset: 8 });
+  const [newPreset, setNewPreset] = useState({ name: '', encoder: 'libsvtav1', crf: 28, preset: 8 as number | string, extra_args: '', output_ext: 'auto' });
 
   const showToast = useCallback((message: string, type: Toast['type'] = 'info') => {
     const id = ++toastSeq.current;
@@ -202,8 +227,11 @@ function App() {
 
   const availableEncoders = useMemo(() => hardware.encoders.filter((encoder) => encoder.available), [hardware.encoders]);
   const allFiles = useMemo(() => watchFolders.flatMap((wf) => wf.files), [watchFolders]);
+  const browserFolders = useMemo(() => fileBrowser.entries.filter((entry) => entry.is_dir), [fileBrowser.entries]);
   const selectedSet = useMemo(() => new Set(selectedFiles), [selectedFiles]);
   const allSelected = allFiles.length > 0 && allFiles.every((file) => selectedSet.has(file.path));
+  const onlineTaskIds = useMemo(() => new Set(onlineJobs.map((job) => job.task_id).filter(Boolean) as string[]), [onlineJobs]);
+  const onlineTasks = useMemo(() => tasks.filter((task) => onlineTaskIds.has(task.task_id)), [onlineTaskIds, tasks]);
 
   const loadWatchFolders = useCallback(
     async (isInit = false) => {
@@ -329,6 +357,12 @@ function App() {
           return;
         }
         if (msg.task_id) {
+          setOnlineJobs((jobs) => jobs.map((job) => job.task_id === msg.task_id ? {
+            ...job,
+            status: msg.status || job.status,
+            progress: msg.progress ?? job.progress,
+            message: msg.message || msg.current_file || job.message,
+          } : job));
           setTasks((items) => {
             const old = items.find((item) => item.task_id === msg.task_id);
             if (old?.status !== 'done' && msg.status === 'done') showToast(`转码完成: ${msg.current_file || msg.task_id}`, 'success');
@@ -396,6 +430,46 @@ function App() {
     await refreshTasks();
   }
 
+  async function uploadOnlineFiles(files: File[]) {
+    if (!files.length) return;
+    for (const file of files) {
+      const id = `${file.name}-${file.size}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      setOnlineJobs((jobs) => [{ id, name: file.name, size: file.size, status: 'uploading', progress: 0, message: '上传中' }, ...jobs]);
+      try {
+        const body = new FormData();
+        body.append('file', file);
+        body.append('encoder', form.encoder);
+        body.append('crf', String(form.crf));
+        body.append('preset', String(form.preset));
+        body.append('suffix', form.suffix);
+        body.append('output_ext', form.output_ext);
+        const result = await apiUpload<{ task_id: string; download_url: string }>('/api/online/transcode', body);
+        setOnlineJobs((jobs) => jobs.map((job) => job.id === id ? {
+          ...job,
+          task_id: result.task_id,
+          download_url: result.download_url,
+          status: 'pending',
+          message: '等待转码',
+        } : job));
+        showToast(`已提交在线转码: ${file.name}`, 'info');
+        await refreshTasks();
+      } catch (error) {
+        setOnlineJobs((jobs) => jobs.map((job) => job.id === id ? { ...job, status: 'failed', message: errorMessage(error) } : job));
+        showToast(errorMessage(error), 'error');
+      }
+    }
+  }
+
+  async function downloadTaskReport(taskID?: string) {
+    if (!taskID) return;
+    try {
+      await downloadBlob(`/api/transcode/${taskID}/report.pdf`, `fft-report-${taskID}.pdf`, 'application/pdf');
+      showToast('PDF 报告已开始下载', 'success');
+    } catch (error) {
+      showToast(errorMessage(error), 'error');
+    }
+  }
+
   async function runBenchmark() {
     setBenchLoading(true);
     setBenchResults([]);
@@ -413,9 +487,9 @@ function App() {
   }
 
   async function savePreset(preset: Preset | null = null) {
-    const payload = preset ?? { ...newPreset, extra_args: [], output_ext: 'auto', builtin: false };
+    const payload = preset ?? { ...newPreset, extra_args: splitArgs(newPreset.extra_args), output_ext: newPreset.output_ext || 'auto', builtin: false };
     await apiSend('/api/presets', payload);
-    setNewPreset({ name: '', encoder: form.encoder, crf: 28, preset: 8 });
+    setNewPreset({ name: '', encoder: form.encoder, crf: 28, preset: 8, extra_args: '', output_ext: 'auto' });
     setEditingPreset(null);
     await loadPresets();
   }
@@ -448,7 +522,6 @@ function App() {
   }, [benchHistory, lbEncoder, leaderboard, sysInfo]);
 
   const lbEncoders = useMemo(() => Array.from(new Set(leaderboard.map((row) => row.encoder))), [leaderboard]);
-  const activeNav = navItems.find((item) => item.id === tab) ?? navItems[0];
   const isDark = theme === 'dark';
 
   return (
@@ -486,13 +559,6 @@ function App() {
           </nav>
 
           <div className="sidebar-footer">
-            <a className="sidebar-report-button" href="/api/logs/download">
-              <FileText size={18} />
-              <span>
-                <strong>报告</strong>
-                <small>下载运行日志</small>
-              </span>
-            </a>
             <div className="sidebar-footer-meta">
               <span>FFT v1.0.0</span>
               <a className="sidebar-log-link" href="/api/logs/download"><Download size={13} />日志</a>
@@ -502,24 +568,27 @@ function App() {
 
         <div className="app-content">
           <header className="app-topbar">
-            <div>
-              <h2>{activeNav.label}</h2>
-              <p>{activeNav.description}</p>
-            </div>
             <button className="theme-toggle" aria-label={isDark ? '切换到浅色模式' : '切换到深色模式'} title={isDark ? '浅色模式' : '深色模式'} onClick={() => setTheme(isDark ? 'light' : 'dark')}>
               {isDark ? <Sun size={17} /> : <Moon size={17} />}
               <span>{isDark ? '浅色' : '深色'}</span>
             </button>
           </header>
 
-          <main className={`app-main ${tab === 'transcode' ? 'workspace-grid' : tab === 'console' ? 'workspace-console' : 'workspace-single'}`}>
+          <main className={`app-main ${tab === 'transcode' ? 'workspace-grid' : tab === 'console' || tab === 'online' || tab === 'system' ? 'workspace-console' : 'workspace-single'}`}>
             {tab === 'console' && (
               <ConsolePage watchFolders={watchFolders} tasks={tasks} sysInfo={sysInfo} />
             )}
 
+            {tab === 'online' && (
+              <OnlinePage jobs={onlineJobs} tasks={onlineTasks} form={form} onUpload={(files) => void uploadOnlineFiles(files)} onDownloadReport={downloadTaskReport} />
+            )}
+
+            {tab === 'system' && (
+              <SystemPage sysInfo={sysInfo} tasks={tasks} hardware={hardware} hwLoading={hwLoading} onRefresh={() => void detectHardware(true)} />
+            )}
+
             {tab === 'transcode' && (
               <section className="panel workspace-panel">
-                <SystemInfoPanel sysInfo={sysInfo} />
                 <div className="flex flex-wrap items-end gap-2 border-b border-line p-4">
                   <label className="field min-w-[260px] flex-1">
                     <span>监控文件夹</span>
@@ -593,12 +662,10 @@ function App() {
               </section>
             )}
 
-            {tab !== 'console' && (
+            {tab !== 'console' && tab !== 'online' && tab !== 'system' && (
               <section className="panel workspace-panel">
           {tab === 'transcode' && (
             <div className="space-y-4 p-4">
-              <EncoderSupportPanel hardware={hardware} hwLoading={hwLoading} onRefresh={() => void detectHardware(true)} />
-
               <div className="section-title"><Gauge size={18} />转码设置</div>
               <div className="grid gap-3 sm:grid-cols-2">
                 <label className="field">
@@ -645,6 +712,11 @@ function App() {
                     {task.output_path && <div className="text-muted truncate text-xs" title={task.output_path}>输出: {task.output_path}</div>}
                     <div className="progress-track mt-2"><div className="progress-fill" style={{ width: `${task.progress || 0}%` }} /></div>
                     <div className="text-muted mt-1 text-xs">{task.progress || 0}% {task.speed ? `· ${task.speed}` : ''} {task.message}</div>
+                    {task.status === 'done' && (
+                      <div className="task-actions">
+                        <button className="btn" type="button" onClick={() => void downloadTaskReport(task.task_id)}><FileText size={16} />PDF 报告</button>
+                      </div>
+                    )}
                   </div>
                 ))}
                 {!tasks.length && <div className="empty-state compact">暂无任务</div>}
@@ -655,7 +727,6 @@ function App() {
           {tab === 'benchmark' && (
             <div className="space-y-4 p-4">
               <div className="section-title"><BarChart3 size={18} />跑分测试</div>
-              <SystemInfoPanel sysInfo={sysInfo} />
               <div className="segmented w-full">
                 <button className={benchView === 'leaderboard' ? 'active' : ''} onClick={() => setBenchView('leaderboard')}>排行榜</button>
                 <button className={benchView === 'test' ? 'active' : ''} onClick={() => setBenchView('test')}>跑分测试</button>
@@ -684,6 +755,7 @@ function App() {
               {benchView === 'test' && (
                 <div className="space-y-4">
                   <EncoderSupportPanel
+                    title="选择跑分编码器"
                     hardware={hardware}
                     hwLoading={hwLoading}
                     selectedEncoders={benchEncoders}
@@ -701,38 +773,25 @@ function App() {
           )}
 
           {tab === 'presets' && (
-            <div className="space-y-4 p-4">
-              <div className="section-title"><Save size={18} />预设管理</div>
-              <div className="space-y-3">
-                {presets.map((preset) => (
-                  <div key={preset.name} className="item-card">
-                    <div className="flex items-center justify-between gap-2">
-                      <div><b>{preset.name}</b>{preset.builtin && <span className="pill ml-2">内置</span>}</div>
-                      <div className="flex gap-2">
-                        <button className="icon-btn" title="编辑" onClick={() => { setEditingPreset(preset.name); setEditPreset({ encoder: preset.encoder, crf: preset.crf, preset: preset.preset, extra_args: (preset.extra_args || []).join(' ') }); }}><Settings size={16} /></button>
-                        {!preset.builtin && <button className="icon-btn danger" title="删除" onClick={() => void apiSend(`/api/presets/${encodeURIComponent(preset.name)}`, undefined, 'DELETE').then(loadPresets)}><Trash2 size={16} /></button>}
-                        {preset.builtin && <button className="icon-btn" title="重置" onClick={() => void apiSend(`/api/presets/${encodeURIComponent(preset.name)}/reset`, {}, 'POST').then(loadPresets)}><RefreshCw size={16} /></button>}
-                      </div>
-                    </div>
-                    {editingPreset === preset.name ? (
-                      <div className="mt-3 grid gap-2">
-                        <select value={editPreset.encoder} onChange={(event) => setEditPreset((old) => ({ ...old, encoder: event.target.value }))}>{availableEncoders.map((encoder) => <option key={encoder.name} value={encoder.name}>{encoder.label}</option>)}</select>
-                        <div className="grid gap-2 sm:grid-cols-2"><input type="number" value={editPreset.crf} onChange={(event) => setEditPreset((old) => ({ ...old, crf: Number(event.target.value) }))} /><input value={editPreset.preset} onChange={(event) => setEditPreset((old) => ({ ...old, preset: event.target.value }))} /></div>
-                        <input value={editPreset.extra_args} onChange={(event) => setEditPreset((old) => ({ ...old, extra_args: event.target.value }))} placeholder="-svtav1-params lossless=1" />
-                        <div className="flex gap-2"><button className="btn primary" onClick={() => void savePreset({ ...preset, ...editPreset, extra_args: splitArgs(editPreset.extra_args) })}><Check size={16} />保存</button><button className="btn" onClick={() => setEditingPreset(null)}><X size={16} />取消</button></div>
-                      </div>
-                    ) : (
-                      <div className="text-soft mt-2 text-sm">编码器: {preset.encoder} · CRF: {preset.crf} · Preset: {preset.preset}<code className="code-line">{presetCmd(preset)}</code></div>
-                    )}
-                  </div>
-                ))}
-              </div>
-              <div className="item-card">
-                <div className="mb-3 font-semibold">新建预设</div>
-                <div className="grid gap-2 sm:grid-cols-2"><input value={newPreset.name} onChange={(event) => setNewPreset((old) => ({ ...old, name: event.target.value }))} placeholder="名称" /><select value={newPreset.encoder} onChange={(event) => setNewPreset((old) => ({ ...old, encoder: event.target.value }))}>{availableEncoders.map((encoder) => <option key={encoder.name} value={encoder.name}>{encoder.label}</option>)}</select><input type="number" value={newPreset.crf} onChange={(event) => setNewPreset((old) => ({ ...old, crf: Number(event.target.value) }))} /><input type="number" value={newPreset.preset} onChange={(event) => setNewPreset((old) => ({ ...old, preset: Number(event.target.value) }))} /></div>
-                <button className="btn primary mt-3" disabled={!newPreset.name} onClick={() => void savePreset()}><Save size={16} />保存预设</button>
-              </div>
-            </div>
+            <PresetsWorkspace
+              presets={presets}
+              availableEncoders={availableEncoders}
+              editingPreset={editingPreset}
+              editPreset={editPreset}
+              newPreset={newPreset}
+              onCreate={() => setEditingPreset('__new__')}
+              onSelect={(preset) => {
+                setEditingPreset(preset.name);
+                setEditPreset({ encoder: preset.encoder, crf: preset.crf, preset: preset.preset, extra_args: (preset.extra_args || []).join(' ') });
+              }}
+              onEditChange={setEditPreset}
+              onNewChange={setNewPreset}
+              onCancel={() => setEditingPreset(null)}
+              onSave={(preset) => void savePreset(preset)}
+              onSaveNew={() => void savePreset()}
+              onDelete={(preset) => void apiSend(`/api/presets/${encodeURIComponent(preset.name)}`, undefined, 'DELETE').then(loadPresets).then(() => setEditingPreset(null))}
+              onReset={(preset) => void apiSend(`/api/presets/${encodeURIComponent(preset.name)}/reset`, {}, 'POST').then(loadPresets).then(() => setEditingPreset(null))}
+            />
           )}
               </section>
             )}
@@ -741,28 +800,53 @@ function App() {
       </div>
 
       {browserMode && (
-        <div className="modal">
-          <div className="modal-card">
-            <div className="flex items-center justify-between border-b border-line p-4">
-              <h2 className="font-semibold">{browserMode === 'watch' ? '选择目录' : '选择导出目录'}</h2>
-              <button className="icon-btn" onClick={() => setBrowserMode(null)}><X size={16} /></button>
+        <div className="modal folder-browser-modal">
+          <div className="modal-card folder-browser-card" role="dialog" aria-modal="true" aria-label={browserMode === 'watch' ? '选择监控目录' : '选择导出目录'}>
+            <div className="folder-browser-header">
+              <div className="folder-browser-title">
+                <span className="folder-browser-icon"><FolderOpen size={18} /></span>
+                <div>
+                  <h2>{browserMode === 'watch' ? '选择监控目录' : '选择导出目录'}</h2>
+                  <p>{browserMode === 'watch' ? '监控文件夹' : '自定义输出'}</p>
+                </div>
+              </div>
+              <button className="icon-btn" aria-label="关闭" onClick={() => setBrowserMode(null)}><X size={16} /></button>
             </div>
-            <div className="flex items-center gap-2 border-b border-line px-4 py-2 text-sm">
-              <button className="icon-btn" disabled={!fileBrowser.parent} onClick={() => fileBrowser.parent && void browseTo(fileBrowser.parent)}><ChevronLeft size={16} /></button>
-              <span className="text-soft truncate">{fileBrowser.current}</span>
+            <div className="folder-browser-pathbar">
+              <button className="icon-btn" title="返回上级" aria-label="返回上级" disabled={!fileBrowser.parent} onClick={() => fileBrowser.parent && void browseTo(fileBrowser.parent)}><ChevronLeft size={16} /></button>
+              <div className="folder-browser-path">
+                <span>当前位置</span>
+                <strong title={fileBrowser.current}>{fileBrowser.current}</strong>
+              </div>
             </div>
-            <div className="max-h-[55vh] overflow-auto p-2">
-              {fileBrowser.entries.filter((entry) => entry.is_dir).map((entry) => (
-                <button key={entry.path} className="folder-option" onClick={() => void browseTo(entry.path)}><Folder size={16} className="mr-2 inline" />{entry.name}</button>
+            <div className="folder-browser-list">
+              {browserFolders.map((entry) => (
+                <button key={entry.path} className="folder-option" onClick={() => void browseTo(entry.path)}>
+                  <span className="folder-option-icon"><Folder size={18} /></span>
+                  <span className="folder-option-text">
+                    <span className="folder-option-name">{entry.name || entry.path}</span>
+                    <span className="folder-option-path" title={entry.path}>{entry.path}</span>
+                  </span>
+                  <ChevronRight className="folder-option-arrow" size={17} />
+                </button>
               ))}
+              {!browserFolders.length && (
+                <div className="folder-browser-empty">
+                  <FolderOpen size={24} />
+                  <span>当前目录下没有可进入的文件夹</span>
+                </div>
+              )}
             </div>
-            <div className="flex justify-end gap-2 border-t border-line p-4">
-              <button className="btn" onClick={() => setBrowserMode(null)}>取消</button>
-              <button className="btn primary" onClick={() => {
-                if (browserMode === 'watch') void addWatchFolder(fileBrowser.current);
-                if (browserMode === 'output') void updateFolder(outputFolderRef.current, { output_dir: fileBrowser.current });
-                setBrowserMode(null);
-              }}><Check size={16} />选择此目录</button>
+            <div className="folder-browser-footer">
+              <div className="folder-browser-selected">已选 <strong title={fileBrowser.current}>{fileBrowser.current}</strong></div>
+              <div className="folder-browser-actions">
+                <button className="btn" onClick={() => setBrowserMode(null)}>取消</button>
+                <button className="btn primary" onClick={() => {
+                  if (browserMode === 'watch') void addWatchFolder(fileBrowser.current);
+                  if (browserMode === 'output') void updateFolder(outputFolderRef.current, { output_dir: fileBrowser.current });
+                  setBrowserMode(null);
+                }}><Check size={16} />选择此目录</button>
+              </div>
             </div>
           </div>
         </div>
@@ -945,6 +1029,298 @@ function StatusChip({ tone, icon: Icon, label, value }: { tone: 'running' | 'upc
   );
 }
 
+function OnlinePage({ jobs, tasks, form, onUpload, onDownloadReport }: { jobs: OnlineJob[]; tasks: TaskInfo[]; form: TranscodeForm; onUpload: (files: File[]) => void; onDownloadReport: (taskID?: string) => void }) {
+  const [dragging, setDragging] = useState(false);
+  const taskByID = useMemo(() => new Map(tasks.map((task) => [task.task_id, task])), [tasks]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const acceptFiles = (fileList: FileList | null) => {
+    const files = Array.from(fileList || []).filter((file) => file.size > 0);
+    if (files.length) onUpload(files);
+  };
+
+  return (
+    <section className="online-page">
+      <div className={`online-dropzone ${dragging ? 'active' : ''}`}
+        onDragOver={(event) => {
+          event.preventDefault();
+          setDragging(true);
+        }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={(event) => {
+          event.preventDefault();
+          setDragging(false);
+          acceptFiles(event.dataTransfer.files);
+        }}
+      >
+        <input ref={fileInputRef} type="file" multiple hidden onChange={(event) => acceptFiles(event.target.files)} />
+        <div className="online-drop-icon"><CloudUpload size={34} /></div>
+        <div>
+          <h3>拖拽文件到这里开始在线转码</h3>
+          <p>文件会先进入服务器缓存目录，转码完成后可直接在浏览器下载。</p>
+        </div>
+        <button className="btn primary" onClick={() => fileInputRef.current?.click()}><FileUpIcon />选择文件</button>
+      </div>
+
+      <div className="online-settings-strip">
+        <span>当前参数</span>
+        <b>{form.encoder}</b>
+        <b>CRF {form.crf}</b>
+        <b>Preset {String(form.preset)}</b>
+        <b>{form.output_ext === 'auto' ? '自动格式' : form.output_ext}</b>
+      </div>
+
+      <div className="online-job-list">
+        <div className="section-title"><FileDown size={18} />在线任务</div>
+        {jobs.map((job) => {
+          const task = job.task_id ? taskByID.get(job.task_id) : undefined;
+          const status = task?.status || job.status;
+          const progress = task?.progress ?? job.progress;
+          const message = task?.message || task?.current_file || job.message;
+          const downloadURL = job.download_url || (job.task_id ? `/api/online/download/${job.task_id}` : '');
+          return (
+            <div key={job.id} className="online-job-card">
+              <div className="online-job-head">
+                <div className="min-w-0">
+                  <strong title={job.name}>{job.name}</strong>
+                  <span>{formatSize(job.size)} · {job.task_id || '等待任务号'}</span>
+                </div>
+                <span className={`status ${status}`}>{statusText(status)}</span>
+              </div>
+              <div className="progress-track mt-3"><div className="progress-fill" style={{ width: `${progress || 0}%` }} /></div>
+              <div className="online-job-foot">
+                <span>{Math.round(progress || 0)}% {message ? `· ${message}` : ''}</span>
+                {status === 'done' && downloadURL && (
+                  <div className="online-job-actions">
+                    <button className="btn" type="button" onClick={() => onDownloadReport(job.task_id)}><FileText size={16} />PDF 报告</button>
+                    <a className="btn primary" href={downloadURL}><Download size={16} />下载</a>
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+        {!jobs.length && <div className="empty-state compact">还没有在线任务</div>}
+      </div>
+    </section>
+  );
+}
+
+function FileUpIcon() {
+  return <CloudUpload size={16} />;
+}
+
+function PresetsWorkspace({
+  presets,
+  availableEncoders,
+  editingPreset,
+  editPreset,
+  newPreset,
+  onCreate,
+  onSelect,
+  onEditChange,
+  onNewChange,
+  onCancel,
+  onSave,
+  onSaveNew,
+  onDelete,
+  onReset,
+}: {
+  presets: Preset[];
+  availableEncoders: EncoderInfo[];
+  editingPreset: string | null;
+  editPreset: { encoder: string; crf: number; preset: number | string; extra_args: string };
+  newPreset: { name: string; encoder: string; crf: number; preset: number | string; extra_args: string; output_ext: string };
+  onCreate: () => void;
+  onSelect: (preset: Preset) => void;
+  onEditChange: React.Dispatch<React.SetStateAction<{ encoder: string; crf: number; preset: number | string; extra_args: string }>>;
+  onNewChange: React.Dispatch<React.SetStateAction<{ name: string; encoder: string; crf: number; preset: number | string; extra_args: string; output_ext: string }>>;
+  onCancel: () => void;
+  onSave: (preset: Preset) => void;
+  onSaveNew: () => void;
+  onDelete: (preset: Preset) => void;
+  onReset: (preset: Preset) => void;
+}) {
+  const selectedPreset = presets.find((preset) => preset.name === editingPreset) ?? null;
+  const creating = editingPreset === '__new__';
+  const previewPreset: Preset | null = creating
+    ? {
+      name: newPreset.name || '新建预设',
+      encoder: newPreset.encoder,
+      crf: Number(newPreset.crf),
+      preset: newPreset.preset,
+      extra_args: splitArgs(newPreset.extra_args),
+      builtin: false,
+      output_ext: newPreset.output_ext,
+    }
+    : selectedPreset
+      ? {
+        ...selectedPreset,
+        encoder: editPreset.encoder,
+        crf: Number(editPreset.crf),
+        preset: editPreset.preset,
+        extra_args: splitArgs(editPreset.extra_args),
+      }
+      : null;
+
+  return (
+    <div className="presets-workspace">
+      <aside className="presets-list-panel">
+        <div className="presets-list-head">
+          <div className="section-title"><Save size={18} />预设列表</div>
+          <button className="btn primary" onClick={onCreate}><Plus size={16} />新建</button>
+        </div>
+        <div className="presets-list">
+          {creating && (
+            <button className="preset-list-item draft active" onClick={onCreate}>
+              <span>
+                <strong>{newPreset.name || '新建预设'}</strong>
+                <small>新的转码参数</small>
+              </span>
+              <b>{encoderKindLabel(newPreset.encoder)}</b>
+            </button>
+          )}
+          {presets.map((preset) => {
+            const active = selectedPreset?.name === preset.name;
+            return (
+              <button key={preset.name} className={`preset-list-item ${active ? 'active' : ''}`} onClick={() => onSelect(preset)}>
+                <span>
+                  <strong>{preset.name}</strong>
+                  <small>{preset.encoder} · CRF {preset.crf} · Preset {String(preset.preset)}</small>
+                </span>
+                <span className="preset-list-badges">
+                  {preset.builtin && <b className="builtin">内置</b>}
+                  <b>{encoderKindLabel(preset.encoder)}</b>
+                </span>
+              </button>
+            );
+          })}
+          {!presets.length && !creating && <div className="empty-state compact">暂无预设</div>}
+        </div>
+      </aside>
+
+      <section className="preset-editor-panel">
+        {!previewPreset ? (
+          <div className="preset-empty">
+            <Save size={28} />
+            <span>选择左侧预设或新建一个预设</span>
+          </div>
+        ) : (
+          <>
+            <div className="preset-editor-head">
+              <div className="min-w-0">
+                <h3>{creating ? '新建预设' : selectedPreset?.name}</h3>
+                <p>{creating ? '保存一组常用转码参数' : selectedPreset?.builtin ? '内置预设，可另存覆盖或重置' : '自定义预设，可直接编辑保存'}</p>
+              </div>
+              <div className="preset-editor-actions">
+                <button className="btn" onClick={onCancel}><X size={16} />取消</button>
+                {!creating && selectedPreset && (
+                  selectedPreset.builtin
+                    ? <button className="btn" onClick={() => onReset(selectedPreset)}><RefreshCw size={16} />重置</button>
+                    : <button className="btn danger" onClick={() => onDelete(selectedPreset)}><Trash2 size={16} />删除</button>
+                )}
+                <button
+                  className="btn primary"
+                  disabled={creating ? !newPreset.name.trim() : !selectedPreset}
+                  onClick={() => {
+                    if (creating) {
+                      onSaveNew();
+                      return;
+                    }
+                    if (selectedPreset) onSave({ ...selectedPreset, ...editPreset, extra_args: splitArgs(editPreset.extra_args) });
+                  }}
+                >
+                  <Save size={16} />保存
+                </button>
+              </div>
+            </div>
+
+            <div className="preset-editor-body">
+              <div className="preset-form-grid">
+                {creating && (
+                  <label className="field span-2">
+                    <span>预设名称</span>
+                    <input value={newPreset.name} onChange={(event) => onNewChange((old) => ({ ...old, name: event.target.value }))} placeholder="例如：高压缩 AV1" />
+                  </label>
+                )}
+                <label className="field">
+                  <span>编码器</span>
+                  <select
+                    value={creating ? newPreset.encoder : editPreset.encoder}
+                    onChange={(event) => {
+                      if (creating) onNewChange((old) => ({ ...old, encoder: event.target.value }));
+                      else onEditChange((old) => ({ ...old, encoder: event.target.value }));
+                    }}
+                  >
+                    {availableEncoders.map((encoder) => <option key={encoder.name} value={encoder.name}>{encoder.label}</option>)}
+                  </select>
+                </label>
+                <label className="field">
+                  <span>输出格式</span>
+                  <select
+                    value={creating ? newPreset.output_ext : selectedPreset?.output_ext || 'auto'}
+                    disabled={!creating}
+                    onChange={(event) => onNewChange((old) => ({ ...old, output_ext: event.target.value }))}
+                  >
+                    <option value="auto">自动</option>
+                    <option value=".mkv">.mkv</option>
+                    <option value=".mp4">.mp4</option>
+                    <option value=".webm">.webm</option>
+                  </select>
+                </label>
+                <label className="field">
+                  <span>CRF</span>
+                  <input
+                    type="number"
+                    value={creating ? newPreset.crf : editPreset.crf}
+                    onChange={(event) => {
+                      const value = Number(event.target.value);
+                      if (creating) onNewChange((old) => ({ ...old, crf: value }));
+                      else onEditChange((old) => ({ ...old, crf: value }));
+                    }}
+                  />
+                </label>
+                <label className="field">
+                  <span>Preset</span>
+                  <input
+                    value={creating ? newPreset.preset : editPreset.preset}
+                    onChange={(event) => {
+                      if (creating) onNewChange((old) => ({ ...old, preset: event.target.value }));
+                      else onEditChange((old) => ({ ...old, preset: event.target.value }));
+                    }}
+                  />
+                </label>
+                <label className="field span-2">
+                  <span>额外参数</span>
+                  <input
+                    value={creating ? newPreset.extra_args : editPreset.extra_args}
+                    onChange={(event) => {
+                      if (creating) onNewChange((old) => ({ ...old, extra_args: event.target.value }));
+                      else onEditChange((old) => ({ ...old, extra_args: event.target.value }));
+                    }}
+                    placeholder="-svtav1-params lossless=1"
+                  />
+                </label>
+              </div>
+
+              <div className="preset-preview-card">
+                <div className="preset-preview-title">FFmpeg 命令预览</div>
+                <code>{presetCmd(previewPreset)}</code>
+              </div>
+            </div>
+          </>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function encoderKindLabel(encoder: string) {
+  if (encoder.includes('nvenc')) return 'NVIDIA';
+  if (encoder.includes('qsv')) return 'Intel';
+  if (encoder.includes('amf')) return 'AMD';
+  return 'CPU';
+}
+
 function bucketTasks(tasks: TaskInfo[], days: number, getValue: (task: TaskInfo) => number) {
   const buckets = Array.from({ length: days }, () => 0);
   const today = startOfDay(new Date()).getTime();
@@ -974,18 +1350,77 @@ function RangeField({ label, value, min, max, onChange }: { label: string; value
   return <label className="field"><span>{label}: {value}</span><input type="range" min={min} max={max} value={value} onChange={(event) => onChange(Number(event.target.value))} /></label>;
 }
 
-function SystemInfoPanel({ sysInfo }: { sysInfo: SystemInfo | null }) {
+function SystemPage({
+  sysInfo,
+  tasks,
+  hardware,
+  hwLoading,
+  onRefresh,
+}: {
+  sysInfo: SystemInfo | null;
+  tasks: TaskInfo[];
+  hardware: HardwareReport;
+  hwLoading: boolean;
+  onRefresh: () => void;
+}) {
+  const active = tasks.filter((task) => task.status === 'running').length;
+  const queued = tasks.filter((task) => task.status === 'pending').length;
+  const completed = tasks.filter((task) => task.status === 'done').length;
+  const failed = tasks.filter((task) => task.status === 'failed').length;
+  const availableEncoders = hardware.encoders.filter((encoder) => encoder.available);
+  const gpuEncoders = availableEncoders.filter((encoder) => encoder.hw_type !== 'software');
+
   return (
-    <div className="info-panel">
-      <div className="info-panel-head">
+    <section className="system-dashboard" aria-label="系统信息">
+      <div className="system-dashboard-grid">
+        <SystemInfoCard sysInfo={sysInfo} />
+        <TaskStatisticsCard active={active} queued={queued} completed={completed} failed={failed} />
+        <HardwareSummaryCard hardware={hardware} hwLoading={hwLoading} onRefresh={onRefresh} />
+      </div>
+      <div className="system-resource-panel">
+        <div className="dashboard-card-head">
+          <div className="section-title"><Activity size={18} />系统资源</div>
+          <div className="resource-refresh">
+            <span>更新</span>
+            <select aria-label="系统资源刷新间隔" defaultValue="5s">
+              <option value="5s">5s</option>
+              <option value="10s">10s</option>
+              <option value="30s">30s</option>
+            </select>
+          </div>
+        </div>
+        <div className="resource-strip">
+          <ResourceMetric label="CPU 核心" value={String(sysInfo?.cores || 0)} tone="blue" detail={`${sysInfo?.threads || 0} 线程`} />
+          <ResourceMetric label="内存容量" value={sysInfo?.memory || '未知'} tone="purple" detail="系统总内存" />
+          <ResourceMetric label="硬件编码器" value={String(gpuEncoders.length)} tone="amber" detail={`总计 ${availableEncoders.length} 种可用方式`} />
+        </div>
+        <div className="resource-chart" aria-hidden="true">
+          <div className="resource-axis y100">100</div>
+          <div className="resource-axis y75">75</div>
+          <div className="resource-axis y50">50</div>
+          <div className="resource-axis y25">25</div>
+          <div className="resource-axis y0">0</div>
+          <svg viewBox="0 0 100 100" preserveAspectRatio="none">
+            <path d="M0 93 L8 93 L16 92 L24 93 L32 92 L40 93 L48 92 L56 93 L64 92 L72 93 L80 92 L88 92 L100 93" />
+          </svg>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function SystemInfoCard({ sysInfo }: { sysInfo: SystemInfo | null }) {
+  return (
+    <div className="dashboard-card system-info-card">
+      <div className="dashboard-card-head">
         <div className="section-title"><Cpu size={18} />系统信息</div>
       </div>
       {sysInfo ? (
-        <div className="system-grid">
-          <InfoItem label="CPU" value={sysInfo.cpu || '未知'} detail={`${sysInfo.cores || 0} 核 / ${sysInfo.threads || 0} 线程`} />
-          <InfoItem label="GPU" value={sysInfo.gpu || '未检测到'} />
-          <InfoItem label="内存" value={sysInfo.memory || '未知'} />
-          <InfoItem label="系统" value={sysInfo.os || '未知'} />
+        <div className="system-info-list">
+          <InfoRow icon={LayoutDashboard} label="系统" value={sysInfo.os || '未知'} />
+          <InfoRow icon={Cpu} label="CPU" value={sysInfo.cpu || '未知'} badges={[`${sysInfo.cores || 0} 核`, `${sysInfo.threads || 0} 线程`]} />
+          <InfoRow icon={HardDrive} label="内存" value={sysInfo.memory || '未知'} />
+          <InfoRow icon={FileVideo} label="GPU" value={sysInfo.gpu || '未检测到'} />
         </div>
       ) : (
         <div className="empty-state compact">系统信息加载中</div>
@@ -994,23 +1429,125 @@ function SystemInfoPanel({ sysInfo }: { sysInfo: SystemInfo | null }) {
   );
 }
 
-function InfoItem({ label, value, detail }: { label: string; value: string; detail?: string }) {
+function TaskStatisticsCard({ active, queued, completed, failed }: { active: number; queued: number; completed: number; failed: number }) {
   return (
-    <div className="info-item">
-      <span>{label}</span>
-      <strong title={value}>{value}</strong>
-      {detail && <small>{detail}</small>}
+    <div className="dashboard-card">
+      <div className="dashboard-card-head">
+        <div className="section-title"><BarChart3 size={18} />任务统计</div>
+      </div>
+      <div className="task-stat-grid">
+        <TaskStat label="运行中" value={active} icon={Activity} />
+        <TaskStat label="排队中" value={queued} icon={Clock3} />
+        <TaskStat label="已完成" value={completed} icon={CircleCheck} />
+        <TaskStat label="失败" value={failed} icon={CircleX} />
+      </div>
     </div>
   );
 }
 
+function HardwareSummaryCard({ hardware, hwLoading, onRefresh }: { hardware: HardwareReport; hwLoading: boolean; onRefresh: () => void }) {
+  const vendors = ['nvidia', 'intel', 'amd'] as const;
+  const available = hardware.encoders.filter((encoder) => encoder.available);
+  const hardwareAvailable = available.filter((encoder) => encoder.hw_type !== 'software');
+  const softwareAvailable = available.filter((encoder) => encoder.hw_type === 'software');
+  const activeVendor = vendors.find((vendor) => hardwareAvailable.some((encoder) => encoder.hw_type === vendor)) || vendors[0];
+  const decodeFormats = summarizeCodecBadges(hardwareAvailable);
+  const encodeFormats = summarizeCodecBadges(available);
+
+  return (
+    <div className="dashboard-card hardware-summary-card">
+      <div className="dashboard-card-head hardware-head">
+        <div className="section-title"><FileVideo size={18} />GPU 与硬件</div>
+        <div className="vendor-tabs" aria-label="硬件厂商">
+          {vendors.map((vendor) => (
+            <span key={vendor} className={activeVendor === vendor ? 'active' : ''}>{vendor.toUpperCase()}</span>
+          ))}
+        </div>
+      </div>
+      <div className="hardware-state-row">
+        <span className={`detect-pill ${hardwareAvailable.length ? 'ok' : ''}`}>{hwLoading ? '检测中' : hardwareAvailable.length ? '已检测' : '仅软件'}</span>
+        <span className="profile-pill">{available.length} 种可用</span>
+      </div>
+      <CapabilityRow label="硬件方式" count={hardwareAvailable.length} badges={decodeFormats} muted={!hardwareAvailable.length} />
+      <CapabilityRow label="编码方式" count={available.length} badges={encodeFormats} />
+      {softwareAvailable.length > 0 && (
+        <div className="software-codecs">
+          {softwareAvailable.map((encoder) => <span key={encoder.name}>{encoder.label}</span>)}
+        </div>
+      )}
+      <button className="link-button" type="button" onClick={onRefresh}>
+        {hwLoading ? <Loader2 className="animate-spin" size={14} /> : <RefreshCw size={14} />}重新检测
+      </button>
+    </div>
+  );
+}
+
+function InfoRow({ icon: Icon, label, value, badges = [] }: { icon: typeof Activity; label: string; value: string; badges?: string[] }) {
+  return (
+    <div className="info-row">
+      <Icon size={16} />
+      <span>{label}</span>
+      <div className="info-row-value">
+        <strong title={value}>{value}</strong>
+        {badges.length > 0 && (
+          <div className="mini-badges">
+            {badges.map((badge) => <em key={badge}>{badge}</em>)}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TaskStat({ label, value, icon: Icon }: { label: string; value: number; icon: typeof Activity }) {
+  return (
+    <div className="task-stat-tile">
+      <span><Icon size={15} />{label}</span>
+      <strong>{formatCompactNumber(value)}</strong>
+    </div>
+  );
+}
+
+function CapabilityRow({ label, count, badges, muted = false }: { label: string; count: number; badges: string[]; muted?: boolean }) {
+  return (
+    <div className={`capability-row ${muted ? 'muted' : ''}`}>
+      <div className="capability-row-head">
+        <span>{label}</span>
+        <strong>{count}</strong>
+      </div>
+      <div className="codec-badges">
+        {badges.map((badge) => <span key={badge}>{badge}</span>)}
+        {!badges.length && <span>暂无硬件能力</span>}
+      </div>
+    </div>
+  );
+}
+
+function ResourceMetric({ label, value, detail, tone }: { label: string; value: string; detail: string; tone: 'blue' | 'purple' | 'amber' }) {
+  return (
+    <div className={`resource-metric ${tone}`}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+      <small>{detail}</small>
+    </div>
+  );
+}
+
+function summarizeCodecBadges(encoders: EncoderInfo[]) {
+  const labels = encoders.map((encoder) => encoder.name.includes('av1') ? 'AV1' : encoder.label.replace(/\s*\(CPU\)/, ''));
+  const unique = Array.from(new Set(labels));
+  return unique.length > 3 ? [...unique.slice(0, 3), `+${unique.length - 3}`] : unique;
+}
+
 function EncoderSupportPanel({
+  title = '支持的转码方式',
   hardware,
   hwLoading,
   selectedEncoders = [],
   onRefresh,
   onToggle,
 }: {
+  title?: string;
   hardware: HardwareReport;
   hwLoading: boolean;
   selectedEncoders?: string[];
@@ -1023,7 +1560,7 @@ function EncoderSupportPanel({
     <div className="info-panel">
       <div className="info-panel-head">
         <div>
-          <div className="section-title"><FileVideo size={18} />支持的转码方式</div>
+          <div className="section-title"><FileVideo size={18} />{title}</div>
           {hardware.ffmpeg_version && <p>{hardware.ffmpeg_version}</p>}
         </div>
         <button className="btn" onClick={onRefresh}>{hwLoading ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}重新检测</button>
@@ -1098,6 +1635,30 @@ async function apiSend<T = unknown>(url: string, body?: unknown, method = 'POST'
   return response.json();
 }
 
+async function apiUpload<T = unknown>(url: string, body: FormData): Promise<T> {
+  const response = await fetch(url, { method: 'POST', body });
+  if (!response.ok) throw new Error(await responseText(response));
+  return response.json();
+}
+
+async function downloadBlob(url: string, filename: string, expectedType?: string) {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(await responseText(response));
+  const contentType = response.headers.get('content-type') || '';
+  if (expectedType && !contentType.includes(expectedType)) {
+    throw new Error('后端没有返回报告文件，请确认服务已重启到最新版本');
+  }
+  const blob = await response.blob();
+  const objectURL = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = objectURL;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(objectURL), 1000);
+}
+
 async function responseText(response: Response) {
   try {
     const json = await response.json();
@@ -1108,7 +1669,29 @@ async function responseText(response: Response) {
 }
 
 function errorMessage(error: unknown) {
+  if (error instanceof TypeError && /fetch/i.test(error.message)) {
+    return '无法连接后端，请确认服务正在运行，并且已重启到最新版本';
+  }
   return error instanceof Error ? error.message : '请求失败';
+}
+
+function statusText(status: string) {
+  switch (status) {
+    case 'uploading':
+      return '上传中';
+    case 'pending':
+      return '等待中';
+    case 'running':
+      return '转码中';
+    case 'done':
+      return '已完成';
+    case 'failed':
+      return '失败';
+    case 'cancelled':
+      return '已取消';
+    default:
+      return status || '未知';
+  }
 }
 
 function formatSize(bytes = 0) {

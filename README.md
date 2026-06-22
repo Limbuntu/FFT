@@ -85,6 +85,7 @@ docker build -f Dockerfile.intel --build-arg USE_JELLYFIN_FFMPEG=1 --build-arg U
 | `FFT_HOST` | `0.0.0.0` | 监听地址 |
 | `FFT_PORT` | `8166` | 监听端口 |
 | `FFT_DATA_DIR` | 项目根目录 | SQLite、日志等运行数据目录 |
+| `FFT_CACHE_DIR` | `$FFT_DATA_DIR/cache` | 在线调用上传文件和转码输出缓存目录 |
 | `FFT_DB` | `$FFT_DATA_DIR/fft.db` | SQLite 数据库路径 |
 | `FFT_STATIC_DIR` | `frontend/dist` 或 `static` | 前端静态资源目录 |
 | `FFT_LOG_FILE` | `$FFT_DATA_DIR/logs/fft.log` | 日志文件路径 |

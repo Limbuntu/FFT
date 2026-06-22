@@ -9,6 +9,7 @@ import (
 type Config struct {
 	RootDir      string
 	DataDir      string
+	CacheDir     string
 	StaticDir    string
 	DatabasePath string
 	LogFile      string
@@ -20,6 +21,7 @@ type Config struct {
 func Load() Config {
 	root := mustGetwd()
 	dataDir := env("FFT_DATA_DIR", root)
+	cacheDir := env("FFT_CACHE_DIR", filepath.Join(dataDir, "cache"))
 	staticDir := env("FFT_STATIC_DIR", firstExisting(
 		filepath.Join(root, "frontend", "dist"),
 		filepath.Join(root, "static"),
@@ -29,6 +31,7 @@ func Load() Config {
 	return Config{
 		RootDir:      root,
 		DataDir:      dataDir,
+		CacheDir:     cacheDir,
 		StaticDir:    staticDir,
 		DatabasePath: env("FFT_DB", filepath.Join(dataDir, "fft.db")),
 		LogFile:      logFile,

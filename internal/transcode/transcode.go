@@ -117,6 +117,14 @@ func (s *Service) Tasks() []models.TaskInfo {
 	return tasks
 }
 
+func (s *Service) Task(taskID string) (models.TaskInfo, bool) {
+	task := s.get(taskID)
+	if task == nil {
+		return models.TaskInfo{}, false
+	}
+	return *task, true
+}
+
 func (s *Service) run(taskID string) {
 	s.update(taskID, func(t *models.TaskInfo) {
 		t.Status = models.TaskRunning
@@ -132,6 +140,7 @@ func (s *Service) run(taskID string) {
 		if s.status(taskID) == models.TaskCancelled {
 			return
 		}
+		fileStartedAt := time.Now()
 		dst, changed, originalExt, err := buildOutputPath(src, task.Request)
 		if err != nil {
 			s.fail(taskID, err.Error())
@@ -215,6 +224,20 @@ func (s *Service) run(taskID string) {
 			s.fail(taskID, message)
 			return
 		}
+		fileFinishedAt := time.Now()
+		originalSize := fileSize(src)
+		outputSize := fileSize(dst)
+		s.update(taskID, func(t *models.TaskInfo) {
+			t.Results = append(t.Results, models.TaskFileResult{
+				InputPath:    src,
+				OutputPath:   dst,
+				OriginalSize: originalSize,
+				OutputSize:   outputSize,
+				StartedAt:    fileStartedAt,
+				FinishedAt:   fileFinishedAt,
+				DurationSec:  fileFinishedAt.Sub(fileStartedAt).Seconds(),
+			})
+		})
 		log.Printf("Transcode finished for %s -> %s", src, dst)
 	}
 
@@ -223,6 +246,8 @@ func (s *Service) run(taskID string) {
 		t.Status = models.TaskDone
 		t.Message = "All files transcoded"
 		elapsed := time.Since(t.CreatedAt).Seconds()
+		t.FinishedAt = time.Now()
+		t.DurationSec = elapsed
 		t.ETA = "耗时 " + formatDuration(elapsed)
 		t.ETASeconds = 0
 	})
@@ -375,6 +400,7 @@ func cloneTask(task *models.TaskInfo) models.TaskInfo {
 	cloned := *task
 	cloned.Request.Files = append([]string(nil), task.Request.Files...)
 	cloned.Request.ExtraArgs = append([]string(nil), task.Request.ExtraArgs...)
+	cloned.Results = append([]models.TaskFileResult(nil), task.Results...)
 	cloned.Request.FileOutputs = map[string]map[string]string{}
 	for k, v := range task.Request.FileOutputs {
 		cloned.Request.FileOutputs[k] = map[string]string{}
@@ -383,6 +409,14 @@ func cloneTask(task *models.TaskInfo) models.TaskInfo {
 		}
 	}
 	return cloned
+}
+
+func fileSize(path string) int64 {
+	st, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return st.Size()
 }
 
 func buildOutputPath(src string, req models.TranscodeRequest) (string, bool, string, error) {

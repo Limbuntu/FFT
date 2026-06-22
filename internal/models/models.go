@@ -130,7 +130,10 @@ type TaskInfo struct {
 	TotalFiles   int              `json:"total_files"`
 	Message      string           `json:"message"`
 	CreatedAt    time.Time        `json:"created_at"`
+	FinishedAt   time.Time        `json:"finished_at"`
+	DurationSec  float64          `json:"duration_sec"`
 	OutputPath   string           `json:"output_path"`
+	Results      []TaskFileResult `json:"results"`
 }
 
 func (t TaskInfo) ProgressPayload() TaskProgress {
@@ -148,6 +151,16 @@ func (t TaskInfo) ProgressPayload() TaskProgress {
 		OutputPath:   t.OutputPath,
 		CreatedAt:    t.CreatedAt,
 	}
+}
+
+type TaskFileResult struct {
+	InputPath    string    `json:"input_path"`
+	OutputPath   string    `json:"output_path"`
+	OriginalSize int64     `json:"original_size"`
+	OutputSize   int64     `json:"output_size"`
+	StartedAt    time.Time `json:"started_at"`
+	FinishedAt   time.Time `json:"finished_at"`
+	DurationSec  float64   `json:"duration_sec"`
 }
 
 type BenchmarkResult struct {
