@@ -105,8 +105,8 @@ func (s *Service) Cancel(taskID string) bool {
 	if cancel != nil {
 		cancel()
 	}
-	if partial != "" {
-		if err := os.Remove(partial); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if partial != "" && cancel == nil {
+		if err := removePartialOutput(partial); err != nil {
 			log.Printf("remove partial output failed %s: %v", partial, err)
 		}
 	}
@@ -175,6 +175,12 @@ func (s *Service) run(taskID string) {
 		s.notify(taskID)
 
 		duration := probeDuration(src)
+		if s.status(taskID) == models.TaskCancelled {
+			if err := removePartialOutput(dst); err != nil {
+				log.Printf("remove partial output failed %s: %v", dst, err)
+			}
+			return
+		}
 		s.mu.Lock()
 		s.durations[src] = duration
 		s.mu.Unlock()
@@ -186,6 +192,14 @@ func (s *Service) run(taskID string) {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		s.mu.Lock()
+		if taskStatusLocked(s.tasks[taskID]) == models.TaskCancelled {
+			s.mu.Unlock()
+			cancel()
+			if err := removePartialOutput(dst); err != nil {
+				log.Printf("remove partial output failed %s: %v", dst, err)
+			}
+			return
+		}
 		s.cancels[taskID] = cancel
 		s.mu.Unlock()
 
@@ -201,6 +215,12 @@ func (s *Service) run(taskID string) {
 
 		if err := cmd.Start(); err != nil {
 			cancel()
+			if s.status(taskID) == models.TaskCancelled {
+				if err := removePartialOutput(dst); err != nil {
+					log.Printf("remove partial output failed %s: %v", dst, err)
+				}
+				return
+			}
 			s.fail(taskID, err.Error())
 			return
 		}
@@ -223,6 +243,9 @@ func (s *Service) run(taskID string) {
 		s.mu.Unlock()
 
 		if status == models.TaskCancelled {
+			if err := removePartialOutput(dst); err != nil {
+				log.Printf("remove partial output failed %s: %v", dst, err)
+			}
 			return
 		}
 		if err != nil {
@@ -363,6 +386,22 @@ func trimFFmpegDetail(line string) string {
 		return line[len(line)-500:]
 	}
 	return line
+}
+
+func removePartialOutput(path string) error {
+	var lastErr error
+	for attempt := 0; attempt < 8; attempt++ {
+		if err := os.Remove(path); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			lastErr = err
+			time.Sleep(time.Duration(attempt+1) * 150 * time.Millisecond)
+			continue
+		}
+		return nil
+	}
+	return lastErr
 }
 
 func (s *Service) fail(taskID, message string) {
