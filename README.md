@@ -33,7 +33,7 @@ GOFLAGS="-ldflags=-linkmode=external" \
 go run ./cmd/server
 ```
 
-服务默认监听 `http://0.0.0.0:8166`。
+服务默认监听 `http://0.0.0.0:8166`，启动日志会输出 `LAN access: http://局域网IP:8166`。同一局域网设备可直接访问该地址；如果无法访问，请在系统防火墙中放行 8166 端口。
 
 ## 开发模式
 

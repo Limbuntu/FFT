@@ -69,16 +69,17 @@ const (
 )
 
 type TranscodeRequest struct {
-	Files       []string                     `json:"files"`
-	Encoder     string                       `json:"encoder"`
-	CRF         int                          `json:"crf"`
-	Preset      PresetValue                  `json:"preset"`
-	ExtraArgs   []string                     `json:"extra_args"`
-	OutputDir   string                       `json:"output_dir"`
-	OutputDest  string                       `json:"output_dest"`
-	Suffix      string                       `json:"suffix"`
-	OutputExt   string                       `json:"output_ext"`
-	FileOutputs map[string]map[string]string `json:"file_outputs"`
+	Files         []string                     `json:"files"`
+	Encoder       string                       `json:"encoder"`
+	CRF           int                          `json:"crf"`
+	Preset        PresetValue                  `json:"preset"`
+	ExtraArgs     []string                     `json:"extra_args"`
+	OutputDir     string                       `json:"output_dir"`
+	OutputDest    string                       `json:"output_dest"`
+	Suffix        string                       `json:"suffix"`
+	SuffixEnabled *bool                        `json:"suffix_enabled"`
+	OutputExt     string                       `json:"output_ext"`
+	FileOutputs   map[string]map[string]string `json:"file_outputs"`
 }
 
 func (r *TranscodeRequest) Normalize() {
@@ -91,7 +92,9 @@ func (r *TranscodeRequest) Normalize() {
 	if r.OutputDest == "" {
 		r.OutputDest = "beside"
 	}
-	if r.Suffix == "" {
+	if r.SuffixEnabled != nil && !*r.SuffixEnabled {
+		r.Suffix = ""
+	} else if r.Suffix == "" {
 		r.Suffix = "_av1"
 	}
 	if r.OutputExt == "" {
@@ -103,53 +106,56 @@ func (r *TranscodeRequest) Normalize() {
 }
 
 type TaskProgress struct {
-	TaskID       string     `json:"task_id"`
-	Status       TaskStatus `json:"status"`
-	Progress     float64    `json:"progress"`
-	Speed        string     `json:"speed"`
-	ETA          string     `json:"eta"`
-	ETASeconds   float64    `json:"eta_seconds"`
-	CurrentFile  string     `json:"current_file"`
-	CurrentIndex int        `json:"current_index"`
-	TotalFiles   int        `json:"total_files"`
-	Message      string     `json:"message"`
-	OutputPath   string     `json:"output_path"`
-	CreatedAt    time.Time  `json:"created_at"`
+	TaskID              string     `json:"task_id"`
+	Status              TaskStatus `json:"status"`
+	Progress            float64    `json:"progress"`
+	Speed               string     `json:"speed"`
+	ETA                 string     `json:"eta"`
+	ETASeconds          float64    `json:"eta_seconds"`
+	CurrentFile         string     `json:"current_file"`
+	CurrentFileProgress float64    `json:"current_file_progress"`
+	CurrentIndex        int        `json:"current_index"`
+	TotalFiles          int        `json:"total_files"`
+	Message             string     `json:"message"`
+	OutputPath          string     `json:"output_path"`
+	CreatedAt           time.Time  `json:"created_at"`
 }
 
 type TaskInfo struct {
-	TaskID       string           `json:"task_id"`
-	Request      TranscodeRequest `json:"request"`
-	Status       TaskStatus       `json:"status"`
-	Progress     float64          `json:"progress"`
-	Speed        string           `json:"speed"`
-	ETA          string           `json:"eta"`
-	ETASeconds   float64          `json:"eta_seconds"`
-	CurrentFile  string           `json:"current_file"`
-	CurrentIndex int              `json:"current_index"`
-	TotalFiles   int              `json:"total_files"`
-	Message      string           `json:"message"`
-	CreatedAt    time.Time        `json:"created_at"`
-	FinishedAt   time.Time        `json:"finished_at"`
-	DurationSec  float64          `json:"duration_sec"`
-	OutputPath   string           `json:"output_path"`
-	Results      []TaskFileResult `json:"results"`
+	TaskID              string           `json:"task_id"`
+	Request             TranscodeRequest `json:"request"`
+	Status              TaskStatus       `json:"status"`
+	Progress            float64          `json:"progress"`
+	Speed               string           `json:"speed"`
+	ETA                 string           `json:"eta"`
+	ETASeconds          float64          `json:"eta_seconds"`
+	CurrentFile         string           `json:"current_file"`
+	CurrentFileProgress float64          `json:"current_file_progress"`
+	CurrentIndex        int              `json:"current_index"`
+	TotalFiles          int              `json:"total_files"`
+	Message             string           `json:"message"`
+	CreatedAt           time.Time        `json:"created_at"`
+	FinishedAt          time.Time        `json:"finished_at"`
+	DurationSec         float64          `json:"duration_sec"`
+	OutputPath          string           `json:"output_path"`
+	Results             []TaskFileResult `json:"results"`
 }
 
 func (t TaskInfo) ProgressPayload() TaskProgress {
 	return TaskProgress{
-		TaskID:       t.TaskID,
-		Status:       t.Status,
-		Progress:     t.Progress,
-		Speed:        t.Speed,
-		ETA:          t.ETA,
-		ETASeconds:   t.ETASeconds,
-		CurrentFile:  t.CurrentFile,
-		CurrentIndex: t.CurrentIndex,
-		TotalFiles:   t.TotalFiles,
-		Message:      t.Message,
-		OutputPath:   t.OutputPath,
-		CreatedAt:    t.CreatedAt,
+		TaskID:              t.TaskID,
+		Status:              t.Status,
+		Progress:            t.Progress,
+		Speed:               t.Speed,
+		ETA:                 t.ETA,
+		ETASeconds:          t.ETASeconds,
+		CurrentFile:         t.CurrentFile,
+		CurrentFileProgress: t.CurrentFileProgress,
+		CurrentIndex:        t.CurrentIndex,
+		TotalFiles:          t.TotalFiles,
+		Message:             t.Message,
+		OutputPath:          t.OutputPath,
+		CreatedAt:           t.CreatedAt,
 	}
 }
 
@@ -216,6 +222,9 @@ type ManagedFileMeta struct {
 	Channels    int    `json:"channels"`
 	Resolution  string `json:"resolution"`
 	Bitrate     int64  `json:"bitrate"`
+	FrameCount  int64  `json:"frame_count"`
+	FrameRate   string `json:"frame_rate"`
+	BitDepth    int    `json:"bit_depth"`
 	ProbeFailed bool   `json:"probe_failed"`
 }
 
@@ -264,4 +273,18 @@ type SystemInfo struct {
 	Threads int    `json:"threads"`
 	Memory  string `json:"memory"`
 	GPU     string `json:"gpu"`
+}
+
+type SystemUsage struct {
+	CPUPercent      float64   `json:"cpu_percent"`
+	CPUAvailable    bool      `json:"cpu_available"`
+	MemoryPercent   float64   `json:"memory_percent"`
+	MemoryAvailable bool      `json:"memory_available"`
+	MemoryUsed      string    `json:"memory_used"`
+	MemoryTotal     string    `json:"memory_total"`
+	GPUPercent      float64   `json:"gpu_percent"`
+	GPUAvailable    bool      `json:"gpu_available"`
+	GPUName         string    `json:"gpu_name"`
+	GPUMessage      string    `json:"gpu_message"`
+	SampledAt       time.Time `json:"sampled_at"`
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -54,6 +55,7 @@ type Service struct {
 	cancels     map[string]context.CancelFunc
 	partials    map[string]string
 	durations   map[string]float64
+	lastPersist map[string]time.Time
 	broadcaster Broadcaster
 	store       TaskStore
 }
@@ -64,6 +66,7 @@ func New(broadcaster Broadcaster, store TaskStore) *Service {
 		cancels:     map[string]context.CancelFunc{},
 		partials:    map[string]string{},
 		durations:   map[string]float64{},
+		lastPersist: map[string]time.Time{},
 		broadcaster: broadcaster,
 		store:       store,
 	}
@@ -111,6 +114,7 @@ func (s *Service) Cancel(taskID string) bool {
 	task.Status = models.TaskCancelled
 	delete(s.cancels, taskID)
 	delete(s.partials, taskID)
+	delete(s.lastPersist, taskID)
 	s.mu.Unlock()
 
 	if cancel != nil {
@@ -118,7 +122,7 @@ func (s *Service) Cancel(taskID string) bool {
 	}
 	if partial != "" && cancel == nil {
 		if err := removePartialOutput(partial); err != nil {
-			log.Printf("remove partial output failed %s: %v", partial, err)
+			log.Printf("remove partial output failed %s: %s", redactPathForLog(partial), sanitizeLogText(err.Error(), partial))
 		}
 	}
 	s.persist(taskID)
@@ -179,6 +183,7 @@ func (s *Service) run(taskID string) {
 		s.update(taskID, func(t *models.TaskInfo) {
 			t.CurrentIndex = idx
 			t.CurrentFile = filepath.Base(src)
+			t.CurrentFileProgress = 0
 			t.OutputPath = dst
 			t.Message = ""
 		})
@@ -188,7 +193,7 @@ func (s *Service) run(taskID string) {
 		duration := probeDuration(src)
 		if s.status(taskID) == models.TaskCancelled {
 			if err := removePartialOutput(dst); err != nil {
-				log.Printf("remove partial output failed %s: %v", dst, err)
+				log.Printf("remove partial output failed %s: %s", redactPathForLog(dst), sanitizeLogText(err.Error(), dst))
 			}
 			return
 		}
@@ -207,7 +212,7 @@ func (s *Service) run(taskID string) {
 			s.mu.Unlock()
 			cancel()
 			if err := removePartialOutput(dst); err != nil {
-				log.Printf("remove partial output failed %s: %v", dst, err)
+				log.Printf("remove partial output failed %s: %s", redactPathForLog(dst), sanitizeLogText(err.Error(), dst))
 			}
 			return
 		}
@@ -222,13 +227,14 @@ func (s *Service) run(taskID string) {
 			return
 		}
 		cmd.Stdout = io.Discard
-		log.Printf("Transcode cmd: ffmpeg %s", strings.Join(cmd.Args[1:], " "))
+		logVideoMetadata(src)
+		log.Printf("Transcode cmd: ffmpeg %s", sanitizeLogText(strings.Join(cmd.Args[1:], " "), src, dst))
 
 		if err := cmd.Start(); err != nil {
 			cancel()
 			if s.status(taskID) == models.TaskCancelled {
 				if err := removePartialOutput(dst); err != nil {
-					log.Printf("remove partial output failed %s: %v", dst, err)
+					log.Printf("remove partial output failed %s: %s", redactPathForLog(dst), sanitizeLogText(err.Error(), dst))
 				}
 				return
 			}
@@ -250,12 +256,13 @@ func (s *Service) run(taskID string) {
 		s.mu.Lock()
 		delete(s.cancels, taskID)
 		delete(s.partials, taskID)
+		delete(s.lastPersist, taskID)
 		status := taskStatusLocked(s.tasks[taskID])
 		s.mu.Unlock()
 
 		if status == models.TaskCancelled {
 			if err := removePartialOutput(dst); err != nil {
-				log.Printf("remove partial output failed %s: %v", dst, err)
+				log.Printf("remove partial output failed %s: %s", redactPathForLog(dst), sanitizeLogText(err.Error(), dst))
 			}
 			return
 		}
@@ -265,7 +272,7 @@ func (s *Service) run(taskID string) {
 			if detail != "" {
 				message += ": " + detail
 			}
-			log.Printf("Transcode failed for %s: %s", src, message)
+			log.Printf("Transcode failed for %s: %s", redactPathForLog(src), sanitizeLogText(message, src, dst))
 			s.fail(taskID, message)
 			return
 		}
@@ -273,6 +280,7 @@ func (s *Service) run(taskID string) {
 		originalSize := fileSize(src)
 		outputSize := fileSize(dst)
 		s.update(taskID, func(t *models.TaskInfo) {
+			t.CurrentFileProgress = 100
 			t.Results = append(t.Results, models.TaskFileResult{
 				InputPath:    src,
 				OutputPath:   dst,
@@ -283,7 +291,7 @@ func (s *Service) run(taskID string) {
 				DurationSec:  fileFinishedAt.Sub(fileStartedAt).Seconds(),
 			})
 		})
-		log.Printf("Transcode finished for %s -> %s", src, dst)
+		log.Printf("Transcode finished for %s -> %s", redactPathForLog(src), redactPathForLog(dst))
 	}
 
 	s.update(taskID, func(t *models.TaskInfo) {
@@ -296,6 +304,9 @@ func (s *Service) run(taskID string) {
 		t.ETA = "耗时 " + formatDuration(elapsed)
 		t.ETASeconds = 0
 	})
+	s.mu.Lock()
+	delete(s.lastPersist, taskID)
+	s.mu.Unlock()
 	log.Printf("Transcode task %s completed", taskID)
 	s.notify(taskID)
 }
@@ -318,13 +329,14 @@ func (s *Service) readProgress(taskID string, fileIndex int, stderr io.Reader, d
 			speed = speedMatch[1]
 		}
 
-		s.update(taskID, func(t *models.TaskInfo) {
+		s.updateMemory(taskID, func(t *models.TaskInfo) {
 			if speed != "" {
 				t.Speed = speed
 			}
 			if len(timeMatch) == 2 && duration > 0 {
 				current := parseTimestamp(timeMatch[1])
 				fileProgress := math.Min(current/duration, 1)
+				t.CurrentFileProgress = round1(fileProgress * 100)
 				t.Progress = round1(((float64(fileIndex) + fileProgress) / float64(len(t.Request.Files))) * 100)
 				if speed != "" {
 					if speedValue, err := strconvParseSpeed(speed); err == nil && speedValue > 0 {
@@ -342,6 +354,7 @@ func (s *Service) readProgress(taskID string, fileIndex int, stderr io.Reader, d
 			}
 		})
 		s.notify(taskID)
+		s.persistThrottled(taskID, 3*time.Second)
 	}
 }
 
@@ -425,6 +438,9 @@ func (s *Service) fail(taskID, message string) {
 		t.ETA = "失败"
 		t.ETASeconds = 0
 	})
+	s.mu.Lock()
+	delete(s.lastPersist, taskID)
+	s.mu.Unlock()
 	s.notify(taskID)
 }
 
@@ -443,6 +459,14 @@ func (s *Service) broadcast(v any) {
 }
 
 func (s *Service) update(taskID string, fn func(*models.TaskInfo)) {
+	s.updateWithPersist(taskID, true, fn)
+}
+
+func (s *Service) updateMemory(taskID string, fn func(*models.TaskInfo)) {
+	s.updateWithPersist(taskID, false, fn)
+}
+
+func (s *Service) updateWithPersist(taskID string, persist bool, fn func(*models.TaskInfo)) {
 	s.mu.Lock()
 	var snapshot models.TaskInfo
 	if task := s.tasks[taskID]; task != nil {
@@ -450,9 +474,25 @@ func (s *Service) update(taskID string, fn func(*models.TaskInfo)) {
 		snapshot = cloneTask(task)
 	}
 	s.mu.Unlock()
-	if snapshot.TaskID != "" {
+	if persist && snapshot.TaskID != "" {
 		s.saveTask(snapshot)
 	}
+}
+
+func (s *Service) persistThrottled(taskID string, minInterval time.Duration) {
+	task := s.get(taskID)
+	if task == nil {
+		return
+	}
+	s.mu.Lock()
+	last := s.lastPersist[taskID]
+	if !last.IsZero() && time.Since(last) < minInterval {
+		s.mu.Unlock()
+		return
+	}
+	s.lastPersist[taskID] = time.Now()
+	s.mu.Unlock()
+	s.saveTask(*task)
 }
 
 func (s *Service) get(taskID string) *models.TaskInfo {
@@ -644,6 +684,109 @@ func probeDuration(file string) float64 {
 		return 0
 	}
 	return value
+}
+
+type metadataProbe struct {
+	Format struct {
+		Tags map[string]string `json:"tags"`
+	} `json:"format"`
+	Streams []struct {
+		CodecType string            `json:"codec_type"`
+		CodecName string            `json:"codec_name"`
+		Tags      map[string]string `json:"tags"`
+	} `json:"streams"`
+}
+
+func logVideoMetadata(file string) {
+	metadata := probeCreationMetadata(file)
+	log.Printf(
+		"Transcode source metadata for %s: device=%s software=%s encoder=%s",
+		redactPathForLog(file),
+		metadata["device"],
+		metadata["software"],
+		metadata["encoder"],
+	)
+}
+
+func probeCreationMetadata(file string) map[string]string {
+	result := map[string]string{
+		"device":   "未知",
+		"software": "未知",
+		"encoder":  "未知",
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-show_format", "-show_streams", "-of", "json", file)
+	out, err := cmd.Output()
+	if err != nil {
+		return result
+	}
+	var parsed metadataProbe
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		return result
+	}
+	tags := []map[string]string{parsed.Format.Tags}
+	for _, stream := range parsed.Streams {
+		tags = append(tags, stream.Tags)
+		if result["encoder"] == "未知" && stream.CodecType == "video" && stream.CodecName != "" {
+			result["encoder"] = stream.CodecName
+		}
+	}
+	if value := firstTagValue(tags, "com.apple.quicktime.make", "make", "manufacturer"); value != "" {
+		if model := firstTagValue(tags, "com.apple.quicktime.model", "model", "device_model"); model != "" {
+			result["device"] = value + " " + model
+		} else {
+			result["device"] = value
+		}
+	} else if model := firstTagValue(tags, "com.apple.quicktime.model", "model", "device_model"); model != "" {
+		result["device"] = model
+	}
+	if value := firstTagValue(tags, "software", "encoder", "encoding_tool", "com.apple.quicktime.software"); value != "" {
+		result["software"] = value
+	}
+	if value := firstTagValue(tags, "encoder", "encoding_tool"); value != "" {
+		result["encoder"] = value
+	}
+	for key, value := range result {
+		result[key] = sanitizeLogText(value, file)
+	}
+	return result
+}
+
+func firstTagValue(tagSets []map[string]string, keys ...string) string {
+	for _, tags := range tagSets {
+		if len(tags) == 0 {
+			continue
+		}
+		for _, key := range keys {
+			for actual, value := range tags {
+				if strings.EqualFold(actual, key) && strings.TrimSpace(value) != "" {
+					return strings.TrimSpace(value)
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func redactPathForLog(path string) string {
+	name := filepath.Base(path)
+	if name == "." || name == string(filepath.Separator) || name == "" {
+		return "xxxxx"
+	}
+	return filepath.Join("xxxxx", name)
+}
+
+func sanitizeLogText(text string, paths ...string) string {
+	sanitized := text
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		sanitized = strings.ReplaceAll(sanitized, path, redactPathForLog(path))
+		sanitized = strings.ReplaceAll(sanitized, filepath.ToSlash(path), filepath.ToSlash(redactPathForLog(path)))
+	}
+	return sanitized
 }
 
 func parseTimestamp(ts string) float64 {

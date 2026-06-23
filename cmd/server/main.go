@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -47,9 +48,44 @@ func main() {
 	}
 
 	log.Printf("FFT listening on http://%s", addr)
+	for _, url := range lanURLs(cfg.Host, cfg.Port) {
+		log.Printf("LAN access: %s", url)
+	}
 	if err := http.ListenAndServe(addr, server.Router()); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server failed: %v", err)
 	}
+}
+
+func lanURLs(host, port string) []string {
+	if host != "" && host != "0.0.0.0" && host != "::" {
+		return nil
+	}
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	var urls []string
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			ipNet, ok := addr.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip := ipNet.IP.To4()
+			if ip == nil || ip.IsLoopback() || ip.IsUnspecified() {
+				continue
+			}
+			urls = append(urls, fmt.Sprintf("http://%s:%s", ip.String(), port))
+		}
+	}
+	return urls
 }
 
 func openBrowser(url string) {

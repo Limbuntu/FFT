@@ -200,7 +200,7 @@ func (s *Service) benchOnce(enc models.EncoderInfo) models.BenchmarkResult {
 		return models.BenchmarkResult{Encoder: enc.Name, Label: enc.Label, Error: err.Error()}
 	}
 	cmd.Stdout = io.Discard
-	log.Printf("Benchmark cmd: ffmpeg %s", strings.Join(args, " "))
+	log.Printf("Benchmark cmd: ffmpeg %s", strings.Join(redactArgsForLog(args), " "))
 
 	start := time.Now()
 	if err := cmd.Start(); err != nil {
@@ -311,6 +311,26 @@ func encoderArgs(encoder string) []string {
 	default:
 		return nil
 	}
+}
+
+func redactArgsForLog(args []string) []string {
+	redacted := make([]string, len(args))
+	for i, arg := range args {
+		redacted[i] = redactPathForLog(arg)
+	}
+	return redacted
+}
+
+func redactPathForLog(value string) string {
+	normalized := strings.ReplaceAll(value, "\\", "/")
+	if !strings.HasPrefix(normalized, "/") && !regexp.MustCompile(`^[A-Za-z]:/`).MatchString(normalized) {
+		return value
+	}
+	name := filepath.Base(normalized)
+	if name == "." || name == "/" || name == "" {
+		return "xxxxx"
+	}
+	return "xxxxx/" + name
 }
 
 func parseTimestamp(ts string) float64 {

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -63,7 +64,7 @@ func New(cfg config.Config, db *fftdb.DB) *Server {
 	s.bench = benchmark.New(db, detector, hub, cfg.RootDir)
 
 	router := gin.New()
-	router.Use(gin.Logger(), gin.Recovery())
+	router.Use(gin.LoggerWithFormatter(redactingGinLogFormatter), gin.Recovery())
 	s.routes(router)
 	s.router = router
 	return s
@@ -71,6 +72,92 @@ func New(cfg config.Config, db *fftdb.DB) *Server {
 
 func (s *Server) Router() http.Handler {
 	return s.router
+}
+
+func redactingGinLogFormatter(param gin.LogFormatterParams) string {
+	path := redactURLPathForLog(param.Path)
+	if param.ErrorMessage != "" {
+		return fmt.Sprintf("[GIN] %v | %3d | %13v | %15s | %-7s %#v\n%s",
+			param.TimeStamp.Format("2006/01/02 - 15:04:05"),
+			param.StatusCode,
+			param.Latency,
+			param.ClientIP,
+			param.Method,
+			path,
+			redactPathText(param.ErrorMessage),
+		)
+	}
+	return fmt.Sprintf("[GIN] %v | %3d | %13v | %15s | %-7s %#v\n",
+		param.TimeStamp.Format("2006/01/02 - 15:04:05"),
+		param.StatusCode,
+		param.Latency,
+		param.ClientIP,
+		param.Method,
+		path,
+	)
+}
+
+func redactURLPathForLog(rawPath string) string {
+	parsed, err := url.ParseRequestURI(rawPath)
+	if err != nil {
+		return redactPathText(rawPath)
+	}
+	if parsed.RawQuery == "" {
+		return rawPath
+	}
+	pairs := strings.Split(parsed.RawQuery, "&")
+	for i, pair := range pairs {
+		key, value, ok := strings.Cut(pair, "=")
+		if !ok {
+			pairs[i] = redactPathText(pair)
+			continue
+		}
+		decoded, err := url.QueryUnescape(value)
+		if err != nil {
+			pairs[i] = key + "=" + redactPathText(value)
+			continue
+		}
+		if looksLikeFilesystemPath(decoded) {
+			pairs[i] = key + "=" + redactPathForLog(decoded)
+		} else {
+			pairs[i] = key + "=" + redactPathText(decoded)
+		}
+	}
+	parsed.RawQuery = strings.Join(pairs, "&")
+	return parsed.String()
+}
+
+func redactPathText(text string) string {
+	fields := strings.Fields(text)
+	if len(fields) == 0 {
+		return text
+	}
+	redacted := text
+	for _, field := range fields {
+		trimmed := strings.Trim(field, `"'(),;`)
+		if !looksLikeFilesystemPath(trimmed) {
+			continue
+		}
+		redacted = strings.ReplaceAll(redacted, trimmed, redactPathForLog(trimmed))
+	}
+	return redacted
+}
+
+func looksLikeFilesystemPath(value string) bool {
+	normalized := strings.ReplaceAll(value, "\\", "/")
+	return strings.HasPrefix(normalized, "/") || regexp.MustCompile(`^[A-Za-z]:/`).MatchString(normalized)
+}
+
+func redactPathForLog(path string) string {
+	normalized := strings.ReplaceAll(path, "\\", "/")
+	name := normalized
+	if index := strings.LastIndex(normalized, "/"); index >= 0 {
+		name = normalized[index+1:]
+	}
+	if name == "" || name == "." {
+		return "xxxxx"
+	}
+	return "xxxxx/" + name
 }
 
 func (s *Server) routes(r *gin.Engine) {
@@ -88,6 +175,7 @@ func (s *Server) routes(r *gin.Engine) {
 
 	apiGroup.GET("/hardware", s.hardwareInfo)
 	apiGroup.GET("/sysinfo", func(c *gin.Context) { c.JSON(http.StatusOK, sysinfo.Get()) })
+	apiGroup.GET("/system/usage", func(c *gin.Context) { c.JSON(http.StatusOK, sysinfo.Usage()) })
 
 	apiGroup.POST("/transcode", s.startTranscode)
 	apiGroup.DELETE("/transcode/:task_id", s.cancelTranscode)
@@ -159,6 +247,7 @@ func (s *Server) addWatchFolder(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Path is not a directory"})
 		return
 	}
+	req.OutputDest, req.OutputDir = normalizeWatchFolderOutput(abs, req.OutputDest, req.OutputDir)
 	record, err := s.db.AddWatchFolder(abs, req.Label, req.OutputDest, req.OutputDir)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -209,7 +298,27 @@ func (s *Server) updateWatchFolder(c *gin.Context) {
 		}
 		record, err = s.db.MoveWatchFolder(path, abs)
 	} else {
-		record, err = s.db.UpdateWatchFolder(path, req.OutputDest, req.OutputDir, req.Label)
+		if req.OutputDest != nil || req.OutputDir != nil {
+			current, currentErr := s.db.WatchFolder(path)
+			if currentErr != nil {
+				err = currentErr
+			} else {
+				outputDest := current.OutputDest
+				outputDir := current.OutputDir
+				if req.OutputDest != nil {
+					outputDest = *req.OutputDest
+				}
+				if req.OutputDir != nil {
+					outputDir = *req.OutputDir
+				}
+				outputDest, outputDir = normalizeWatchFolderOutput(path, outputDest, outputDir)
+				req.OutputDest = &outputDest
+				req.OutputDir = &outputDir
+				record, err = s.db.UpdateWatchFolder(path, req.OutputDest, req.OutputDir, req.Label)
+			}
+		} else {
+			record, err = s.db.UpdateWatchFolder(path, req.OutputDest, req.OutputDir, req.Label)
+		}
 	}
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -267,6 +376,7 @@ func (s *Server) manageWatchFolder(c *gin.Context) {
 
 	files := watchfolders.ScanFolder(record.Path)
 	tasks := s.transcoder.Tasks()
+	activeOutputs := activeTaskOutputs(tasks)
 	items := make([]models.ManagedFileItem, 0, len(files))
 	targetRoot := targetRootFor(record)
 	var sourceSize, targetSize int64
@@ -297,13 +407,17 @@ func (s *Server) manageWatchFolder(c *gin.Context) {
 		sourceMeta := probeMediaMeta(file.Path)
 		targetMeta := probeMediaMeta(target)
 		status, message := managedStatus(file.Size, targetFileSize, targetExists, targetErr)
+		if target != "" && activeOutputs[target] {
+			status = "running"
+			message = "正在转码"
+		}
 		if isAV1Codec(sourceMeta.VideoCodec) {
 			status = "keep"
 			message = "源文件已是 AV1"
 		} else if target == "" {
 			message = "尚未设置输出方式"
 		}
-		if targetExists && targetMeta.ProbeFailed {
+		if status != "running" && targetExists && targetMeta.ProbeFailed {
 			status = "force"
 			message = "目标文件无法识别，可能已损坏"
 		}
@@ -434,15 +548,16 @@ func (s *Server) startOnlineTranscode(c *gin.Context) {
 	}
 
 	req := models.TranscodeRequest{
-		Files:      []string{inputPath},
-		Encoder:    c.DefaultPostForm("encoder", "libsvtav1"),
-		CRF:        formInt(c, "crf", 28),
-		Preset:     models.PresetValue(c.DefaultPostForm("preset", "8")),
-		Suffix:     c.DefaultPostForm("suffix", "_av1"),
-		OutputExt:  c.DefaultPostForm("output_ext", "auto"),
-		OutputDest: "custom",
-		OutputDir:  outputDir,
-		ExtraArgs:  strings.Fields(c.PostForm("extra_args")),
+		Files:         []string{inputPath},
+		Encoder:       c.DefaultPostForm("encoder", "libsvtav1"),
+		CRF:           formInt(c, "crf", 28),
+		Preset:        models.PresetValue(c.DefaultPostForm("preset", "8")),
+		Suffix:        c.PostForm("suffix"),
+		SuffixEnabled: boolPtr(c.DefaultPostForm("suffix_enabled", "true") != "false"),
+		OutputExt:     c.DefaultPostForm("output_ext", "auto"),
+		OutputDest:    "custom",
+		OutputDir:     outputDir,
+		ExtraArgs:     strings.Fields(c.PostForm("extra_args")),
 	}
 	task, err := s.transcoder.Start(req)
 	if err != nil {
@@ -594,6 +709,29 @@ func pathID(path string) string {
 	return base64.RawURLEncoding.EncodeToString([]byte(path))
 }
 
+func boolPtr(value bool) *bool {
+	return &value
+}
+
+func normalizeWatchFolderOutput(folderPath, outputDest, outputDir string) (string, string) {
+	if outputDest == "custom" && outputDir != "" && sameCleanPath(folderPath, outputDir) {
+		return "beside", ""
+	}
+	return outputDest, outputDir
+}
+
+func sameCleanPath(left, right string) bool {
+	leftAbs, leftErr := filepath.Abs(left)
+	rightAbs, rightErr := filepath.Abs(right)
+	if leftErr == nil {
+		left = leftAbs
+	}
+	if rightErr == nil {
+		right = rightAbs
+	}
+	return strings.EqualFold(filepath.Clean(left), filepath.Clean(right))
+}
+
 func relativePath(root, path string) string {
 	rel, err := filepath.Rel(root, path)
 	if err != nil {
@@ -679,6 +817,24 @@ func managedStatus(sourceSize, targetSize int64, targetExists bool, targetErr er
 	return "keep", "目标文件已存在"
 }
 
+func activeTaskOutputs(tasks []models.TaskInfo) map[string]bool {
+	outputs := map[string]bool{}
+	for _, task := range tasks {
+		if task.Status != models.TaskRunning && task.Status != models.TaskPending {
+			continue
+		}
+		if task.OutputPath != "" {
+			outputs[task.OutputPath] = true
+		}
+		for _, result := range task.Results {
+			if result.OutputPath != "" {
+				outputs[result.OutputPath] = true
+			}
+		}
+	}
+	return outputs
+}
+
 func managedSummary(folder fftdb.WatchFolderRecord, tasks []models.TaskInfo, fileCount int, sourceSize, targetSize int64, targetRoot string) models.ManagedFolderSummary {
 	summary := models.ManagedFolderSummary{
 		Name:       folder.Label,
@@ -737,11 +893,17 @@ func taskTouchesFolder(task models.TaskInfo, folderPath string) bool {
 
 type ffprobeOutput struct {
 	Streams []struct {
-		CodecType string `json:"codec_type"`
-		CodecName string `json:"codec_name"`
-		Width     int    `json:"width"`
-		Height    int    `json:"height"`
-		Channels  int    `json:"channels"`
+		CodecType        string `json:"codec_type"`
+		CodecName        string `json:"codec_name"`
+		Width            int    `json:"width"`
+		Height           int    `json:"height"`
+		Channels         int    `json:"channels"`
+		PixFmt           string `json:"pix_fmt"`
+		BitsPerRawSample string `json:"bits_per_raw_sample"`
+		BitsPerSample    int    `json:"bits_per_sample"`
+		AvgFrameRate     string `json:"avg_frame_rate"`
+		RFrameRate       string `json:"r_frame_rate"`
+		NBFrames         string `json:"nb_frames"`
 	} `json:"streams"`
 	Format struct {
 		BitRate string `json:"bit_rate"`
@@ -776,6 +938,9 @@ func probeMediaMeta(path string) models.ManagedFileMeta {
 				if stream.Width > 0 && stream.Height > 0 {
 					meta.Resolution = fmt.Sprintf("%dx%d", stream.Width, stream.Height)
 				}
+				meta.FrameCount = parseInt64(stream.NBFrames)
+				meta.FrameRate = formatFrameRate(firstNonEmpty(stream.AvgFrameRate, stream.RFrameRate))
+				meta.BitDepth = videoBitDepth(stream.BitsPerRawSample, stream.BitsPerSample, stream.PixFmt)
 			}
 		case "audio":
 			if meta.AudioCodec == "" {
@@ -802,6 +967,60 @@ func parseInt64(value string) int64 {
 		return 0
 	}
 	return parsed
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" && value != "0/0" && value != "N/A" {
+			return value
+		}
+	}
+	return ""
+}
+
+func formatFrameRate(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if num, den, ok := strings.Cut(value, "/"); ok {
+		n := parseFloat(num)
+		d := parseFloat(den)
+		if n > 0 && d > 0 {
+			fps := n / d
+			if fps == float64(int64(fps)) {
+				return fmt.Sprintf("%.0f fps", fps)
+			}
+			return fmt.Sprintf("%.2f fps", fps)
+		}
+	}
+	if fps := parseFloat(value); fps > 0 {
+		return fmt.Sprintf("%.2f fps", fps)
+	}
+	return ""
+}
+
+func parseFloat(value string) float64 {
+	var parsed float64
+	if _, err := fmt.Sscanf(strings.TrimSpace(value), "%f", &parsed); err != nil {
+		return 0
+	}
+	return parsed
+}
+
+func videoBitDepth(rawSample string, bitsPerSample int, pixFmt string) int {
+	if value := int(parseInt64(rawSample)); value > 0 {
+		return value
+	}
+	if bitsPerSample > 0 {
+		return bitsPerSample
+	}
+	match := regexp.MustCompile(`p(\d{2})(?:le|be)?$`).FindStringSubmatch(strings.ToLower(pixFmt))
+	if len(match) == 2 {
+		return int(parseInt64(match[1]))
+	}
+	return 8
 }
 
 func formInt(c *gin.Context, key string, fallback int) int {

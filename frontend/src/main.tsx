@@ -20,6 +20,7 @@ import {
   Folder,
   FolderOpen,
   Gauge,
+  Github,
   HardDrive,
   LayoutDashboard,
   Loader2,
@@ -87,6 +88,9 @@ type ManagedFileMeta = {
   channels: number;
   resolution: string;
   bitrate: number;
+  frame_count: number;
+  frame_rate: string;
+  bit_depth: number;
   probe_failed: boolean;
 };
 
@@ -128,13 +132,14 @@ type ManagedFolderResponse = {
   items: ManagedFileItem[];
 };
 
-type ManagedStatus = 'keep' | 'add' | 'force';
+type ManagedStatus = 'keep' | 'add' | 'force' | 'running';
 
 type TranscodeForm = {
   encoder: string;
   crf: number;
   preset: number | string;
   suffix: string;
+  suffix_enabled: boolean;
   output_ext: string;
   extra_args: string[];
 };
@@ -150,6 +155,7 @@ type TaskInfo = {
   eta: string;
   eta_seconds: number;
   current_file: string;
+  current_file_progress: number;
   current_index: number;
   total_files: number;
   message: string;
@@ -208,6 +214,20 @@ type SystemInfo = {
   gpu: string;
 };
 
+type SystemUsage = {
+  cpu_percent: number;
+  cpu_available: boolean;
+  memory_percent: number;
+  memory_available: boolean;
+  memory_used: string;
+  memory_total: string;
+  gpu_percent: number;
+  gpu_available: boolean;
+  gpu_name: string;
+  gpu_message: string;
+  sampled_at: string;
+};
+
 type Toast = {
   id: number;
   message: string;
@@ -226,8 +246,14 @@ type OnlineJob = {
 };
 
 const emptyBrowser: FileBrowser = { current: '/', parent: null, entries: [] };
-const defaultForm: TranscodeForm = { encoder: 'libsvtav1', crf: 28, preset: 8, suffix: '_av1', output_ext: 'auto', extra_args: [] };
+const defaultForm: TranscodeForm = { encoder: 'libsvtav1', crf: 28, preset: 8, suffix: '_av1', suffix_enabled: true, output_ext: 'auto', extra_args: [] };
 const qsvPresetLabels = ['veryslow', 'slower', 'slow', 'medium', 'fast', 'faster', 'veryfast', 'ultrafast'];
+const presetVendorFilters: { value: PresetVendorFilter; label: string }[] = [
+  { value: 'cpu', label: 'CPU' },
+  { value: 'nvidia', label: 'NVIDIA' },
+  { value: 'intel', label: 'INTEL' },
+  { value: 'amd', label: 'AMD' },
+];
 const watchFolderScanIntervalMs = 60_000;
 const navItems: { id: Tab; label: string; description: string; icon: typeof Activity }[] = [
   { id: 'console', label: '控制台', description: '查看处理概览和运行状态', icon: LayoutDashboard },
@@ -251,7 +277,7 @@ function App() {
   const [managedFolderPath, setManagedFolderPath] = useLocalStorage('fft_managed_folder_path', '');
   const [managedData, setManagedData] = useState<ManagedFolderResponse | null>(null);
   const [managedLoading, setManagedLoading] = useState(false);
-  const [managedActions, setManagedActions] = useState<ManagedStatus[]>(['keep', 'add', 'force']);
+  const [managedActions, setManagedActions] = useState<ManagedStatus[]>(['keep', 'add', 'force', 'running']);
   const [managedOverrides, setManagedOverrides] = useState<Record<string, ManagedStatus>>({});
   const [autoTranscode, setAutoTranscode] = useLocalStorage('fft_auto_transcode_enabled', false);
   const [fileBrowser, setFileBrowser] = useState<FileBrowser>(emptyBrowser);
@@ -279,6 +305,7 @@ function App() {
   const [leaderboard, setLeaderboard] = useState<LeaderboardItem[]>([]);
   const [lbEncoder, setLbEncoder] = useState('');
   const [sysInfo, setSysInfo] = useState<SystemInfo | null>(null);
+  const [systemUsage, setSystemUsage] = useState<SystemUsage | null>(null);
 
   const [presets, setPresets] = useState<Preset[]>([]);
   const [editingPreset, setEditingPreset] = useState<string | null>(null);
@@ -396,15 +423,31 @@ function App() {
     }
   }, [showToast]);
 
+  const loadSystemUsage = useCallback(async () => {
+    try {
+      setSystemUsage(await apiGet<SystemUsage>('/api/system/usage'));
+    } catch {
+      setSystemUsage(null);
+    }
+  }, []);
+
   useEffect(() => {
     void loadWatchFolders(true);
     void detectHardware(false);
     void refreshTasks();
     void loadPresets();
     void loadBenchHistory();
+    void loadSystemUsage();
     void apiGet<SystemInfo>('/api/sysinfo').then(setSysInfo).catch(() => undefined);
     void apiGet<LeaderboardItem[]>('/api/leaderboard').then((rows) => setLeaderboard(rows.sort((a, b) => b.score - a.score))).catch(() => undefined);
-  }, [detectHardware, loadBenchHistory, loadPresets, loadWatchFolders, refreshTasks]);
+  }, [detectHardware, loadBenchHistory, loadPresets, loadSystemUsage, loadWatchFolders, refreshTasks]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void loadSystemUsage();
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [loadSystemUsage]);
 
   useEffect(() => {
     if (!managedFolderPath && watchFolders.length) {
@@ -531,6 +574,15 @@ function App() {
     );
   }
 
+  async function chooseOutputFolder(selectedPath: string) {
+    const sourcePath = outputFolderRef.current;
+    if (!sourcePath) return;
+    const patch: Partial<Pick<WatchFolder, 'output_dest' | 'output_dir'>> = sameFolderPath(selectedPath, sourcePath)
+      ? { output_dest: 'beside', output_dir: '' }
+      : { output_dest: 'custom', output_dir: selectedPath };
+    await updateFolder(sourcePath, patch);
+  }
+
   async function replaceWatchFolder(oldPath: string, newPath: string) {
     if (!oldPath || !newPath) return;
     await apiSend(`/api/watchfolders/${pathToB64(oldPath)}`, { path: newPath }, 'PATCH');
@@ -546,14 +598,15 @@ function App() {
 
   function buildFileOutputs(files: string[]) {
     const map: Record<string, { output_dest: string; output_dir: string; suffix?: string }> = {};
+    const baseSuffix = form.suffix_enabled !== false ? form.suffix || '_av1' : '';
     for (const file of files) {
       const wf = watchFolderForFile(file);
       if (wf) {
-        const outputDest = wf.folder.output_dest || '';
+        const outputDest = normalizedOutputDest(wf.folder);
         if (!outputDest) continue;
         const suffix = outputDest === 'subfolder' || outputDest === 'custom'
-          ? flattenedOutputSuffix(wf.folder.path, file, form.suffix || '_av1')
-          : form.suffix || '_av1';
+          ? flattenedOutputSuffix(wf.folder.path, file, baseSuffix)
+          : baseSuffix;
         map[file] = {
           output_dest: outputDest === 'subfolder' ? 'custom' : outputDest,
           output_dir: outputDest === 'subfolder' ? joinPath(wf.folder.path, 'AV1') : wf.folder.output_dir || '',
@@ -567,7 +620,8 @@ function App() {
   async function startTranscodeFor(files: string[]) {
     const skipped = files.filter((file) => {
       const wf = watchFolderForFile(file);
-      return wf && (!wf.folder.output_dest || (wf.folder.output_dest === 'custom' && !wf.folder.output_dir));
+      const outputDest = wf ? normalizedOutputDest(wf.folder) : '';
+      return wf && (!outputDest || (outputDest === 'custom' && !wf.folder.output_dir));
     });
     const runnableFiles = files.filter((file) => !skipped.includes(file));
     if (skipped.length) {
@@ -577,9 +631,20 @@ function App() {
       showToast('请先为目录监控设置输出方式', 'info');
       return;
     }
-    await apiSend('/api/transcode', { ...form, extra_args: form.extra_args || [], files: runnableFiles, file_outputs: buildFileOutputs(runnableFiles) });
+    await apiSend('/api/transcode', { ...form, suffix_enabled: form.suffix_enabled !== false, extra_args: form.extra_args || [], files: runnableFiles, file_outputs: buildFileOutputs(runnableFiles) });
     showToast(`已提交 ${runnableFiles.length} 个文件转码`, 'info');
     await refreshTasks();
+  }
+
+  async function cancelTranscodeTask(taskID: string) {
+    if (!taskID) return;
+    try {
+      await apiSend(`/api/transcode/${taskID}`, undefined, 'DELETE');
+      showToast('已取消转码任务', 'info');
+      await refreshTasks();
+    } catch (error) {
+      showToast(errorMessage(error), 'error');
+    }
   }
 
   async function startManagedTranscode() {
@@ -610,7 +675,8 @@ function App() {
         body.append('encoder', form.encoder);
         body.append('crf', String(form.crf));
         body.append('preset', String(form.preset));
-        body.append('suffix', form.suffix);
+        body.append('suffix', form.suffix_enabled !== false ? form.suffix : '');
+        body.append('suffix_enabled', String(form.suffix_enabled !== false));
         body.append('output_ext', form.output_ext);
         body.append('extra_args', extraArgs.join(' '));
         const result = await apiUpload<{ task_id: string; download_url: string }>('/api/online/transcode', body);
@@ -768,6 +834,7 @@ function App() {
               <button className="theme-toggle" aria-label={isDark ? '切换到浅色模式' : '切换到深色模式'} title={isDark ? '浅色模式' : '深色模式'} onClick={() => setTheme(isDark ? 'light' : 'dark')}>
                 {isDark ? <Sun size={14} /> : <Moon size={14} />}
               </button>
+              <a className="sidebar-icon-link" href="https://github.com/Limbuntu/FFT" target="_blank" rel="noreferrer" title="GitHub"><Github size={14} /><span>GitHub</span></a>
               <a className="sidebar-log-link" href="/api/logs/download" title="日志"><Download size={13} /><span>日志</span></a>
             </div>
           </div>
@@ -780,6 +847,7 @@ function App() {
                 watchFolders={watchFolders}
                 tasks={tasks}
                 sysInfo={sysInfo}
+                systemUsage={systemUsage}
                 onBrowseWatchFolder={() => { setBrowserMode('watch'); void browseTo('/'); }}
                 onRefreshWatchFolders={() => void loadWatchFolders(false)}
                 wfLoading={wfLoading}
@@ -788,6 +856,7 @@ function App() {
                 onReplaceWatchFolder={(path) => { replacingFolderRef.current = path; setBrowserMode('replace'); void browseTo('/'); }}
                 onBrowseOutputFolder={(path) => { outputFolderRef.current = path; setBrowserMode('output'); void browseTo('/'); }}
                 onStartFolderTranscode={(files) => void startTranscodeFor(files)}
+                onCancelTask={(taskID) => void cancelTranscodeTask(taskID)}
                 autoTranscode={autoTranscode}
                 onAutoTranscodeChange={setAutoTranscode}
               />
@@ -821,6 +890,7 @@ function App() {
                 selectedPath={managedFolderPath}
                 data={managedData}
                 loading={managedLoading}
+                tasks={tasks}
                 actions={managedActions}
                 items={managedItems}
                 filteredItems={managedFilteredItems}
@@ -882,7 +952,23 @@ function App() {
                       onChange={(value) => setForm((old) => ({ ...old, preset: value }))}
                     />
                     <div className="grid gap-3 sm:grid-cols-2">
-                      <label className="field"><span>输出后缀</span><input value={form.suffix} onChange={(event) => setForm((old) => ({ ...old, suffix: event.target.value }))} /></label>
+                      <label className="field">
+                        <span className="field-label-row">
+                          输出后缀
+                          <input
+                            className="mini-toggle-input"
+                            type="checkbox"
+                            checked={form.suffix_enabled !== false}
+                            aria-label="开启输出后缀"
+                            onChange={(event) => setForm((old) => ({ ...old, suffix_enabled: event.target.checked }))}
+                          />
+                        </span>
+                        <input
+                          value={form.suffix}
+                          disabled={form.suffix_enabled === false}
+                          onChange={(event) => setForm((old) => ({ ...old, suffix: event.target.value }))}
+                        />
+                      </label>
                       <label className="field"><span>输出格式</span><select value={form.output_ext} onChange={(event) => setForm((old) => ({ ...old, output_ext: event.target.value }))}><option value="auto">自动</option><option value=".mkv">.mkv</option><option value=".mp4">.mp4</option><option value=".webm">.webm</option></select></label>
                     </div>
                   </div>
@@ -1016,7 +1102,7 @@ function App() {
                     className="btn"
                     type="button"
                     onClick={() => {
-                      void updateFolder(outputFolderRef.current, { output_dest: 'custom', output_dir: outputFolderRef.current });
+                      void chooseOutputFolder(outputFolderRef.current);
                       setBrowserMode(null);
                     }}
                   >
@@ -1079,7 +1165,7 @@ function App() {
                 <button className="btn primary" onClick={() => {
                   if (browserMode === 'watch') void addWatchFolder(fileBrowser.current);
                   if (browserMode === 'replace') void replaceWatchFolder(replacingFolderRef.current, fileBrowser.current);
-                  if (browserMode === 'output') void updateFolder(outputFolderRef.current, { output_dest: 'custom', output_dir: fileBrowser.current });
+                  if (browserMode === 'output') void chooseOutputFolder(fileBrowser.current);
                   setBrowserMode(null);
                 }}><Check size={16} />选择此目录</button>
               </div>
@@ -1092,12 +1178,14 @@ function App() {
 }
 
 type ConsolePeriod = 'week' | 'month';
-type ResourceMode = 'cpu' | 'ram';
+type ResourceMode = 'cpu' | 'ram' | 'gpu';
+type PresetVendorFilter = 'cpu' | 'nvidia' | 'intel' | 'amd';
 
 function ConsolePage({
   watchFolders,
   tasks,
   sysInfo,
+  systemUsage,
   onBrowseWatchFolder,
   onRefreshWatchFolders,
   wfLoading,
@@ -1106,12 +1194,14 @@ function ConsolePage({
   onReplaceWatchFolder,
   onBrowseOutputFolder,
   onStartFolderTranscode,
+  onCancelTask,
   autoTranscode,
   onAutoTranscodeChange,
 }: {
   watchFolders: WatchFolderResult[];
   tasks: TaskInfo[];
   sysInfo: SystemInfo | null;
+  systemUsage: SystemUsage | null;
   onBrowseWatchFolder: () => void;
   onRefreshWatchFolders: () => void;
   wfLoading: boolean;
@@ -1120,6 +1210,7 @@ function ConsolePage({
   onReplaceWatchFolder: (path: string) => void;
   onBrowseOutputFolder: (path: string) => void;
   onStartFolderTranscode: (files: string[]) => void;
+  onCancelTask: (taskID: string) => void;
   autoTranscode: boolean;
   onAutoTranscodeChange: React.Dispatch<React.SetStateAction<boolean>>;
 }) {
@@ -1145,10 +1236,26 @@ function ConsolePage({
   const upcomingCount = tasks.filter((task) => task.status === 'pending').length;
   const finishedCount = completedTasks.reduce((sum, task) => sum + taskFileCount(task), 0);
   const failedCount = failedTasks.reduce((sum, task) => sum + taskFileCount(task), 0);
-  const resourceValue = resourceMode === 'cpu' ? '待采样' : (sysInfo?.memory || '未知');
+  const resourcePercent = resourceMode === 'cpu'
+    ? systemUsage?.cpu_percent
+    : resourceMode === 'ram'
+      ? systemUsage?.memory_percent
+      : systemUsage?.gpu_percent;
+  const resourceAvailable = resourceMode === 'cpu'
+    ? systemUsage?.cpu_available
+    : resourceMode === 'ram'
+      ? systemUsage?.memory_available
+      : systemUsage?.gpu_available;
+  const resourceValue = resourceAvailable
+    ? `${Math.round(resourcePercent || 0)}%`
+    : '未采集';
   const resourceDetail = resourceMode === 'cpu'
     ? (sysInfo ? `${sysInfo.cores || 0} 核 / ${sysInfo.threads || 0} 线程` : '等待系统信息')
-    : '系统内存容量';
+    : resourceMode === 'ram'
+      ? (systemUsage?.memory_available ? `${systemUsage.memory_used} / ${systemUsage.memory_total}` : (sysInfo?.memory || '未知'))
+      : (systemUsage?.gpu_available ? (systemUsage.gpu_name || sysInfo?.gpu || 'GPU 负载') : (systemUsage?.gpu_message || '未检测到 GPU 负载'));
+  const resourcePoints = makeResourcePoints(resourceAvailable ? resourcePercent || 0 : 0);
+  const resourceTitle = resourceMode === 'cpu' ? '处理器' : resourceMode === 'ram' ? '内存' : 'GPU';
 
   return (
     <section className="console-page" aria-label="控制台概览">
@@ -1185,17 +1292,18 @@ function ConsolePage({
           }}
         />
         <MetricCard
-          title={resourceMode === 'cpu' ? '处理器' : '内存'}
+          title={resourceTitle}
           value={resourceValue}
           detail={resourceDetail}
           tone="amber"
           icon={Cpu}
-          points={resourceMode === 'cpu' ? [0, 0, 0, 0, 0, 0, 0] : [1, 1, 1, 1, 1, 1, 1]}
+          points={resourcePoints}
           toggle={{
             value: resourceMode,
             options: [
               { value: 'cpu', label: '处理器' },
               { value: 'ram', label: '内存' },
+              { value: 'gpu', label: 'GPU' },
             ],
             onChange: (value) => setResourceMode(value as ResourceMode),
           }}
@@ -1204,6 +1312,7 @@ function ConsolePage({
 
       <WatchFoldersPanel
         watchFolders={watchFolders}
+        tasks={tasks}
         onBrowseWatchFolder={onBrowseWatchFolder}
         onRefreshWatchFolders={onRefreshWatchFolders}
         wfLoading={wfLoading}
@@ -1212,6 +1321,7 @@ function ConsolePage({
         onReplaceWatchFolder={onReplaceWatchFolder}
         onBrowseOutputFolder={onBrowseOutputFolder}
         onStartFolderTranscode={onStartFolderTranscode}
+        onCancelTask={onCancelTask}
         autoTranscode={autoTranscode}
         onAutoTranscodeChange={onAutoTranscodeChange}
         statusChips={(
@@ -1229,6 +1339,7 @@ function ConsolePage({
 
 function WatchFoldersPanel({
   watchFolders,
+  tasks,
   onBrowseWatchFolder,
   onRefreshWatchFolders,
   wfLoading,
@@ -1237,11 +1348,13 @@ function WatchFoldersPanel({
   onReplaceWatchFolder,
   onBrowseOutputFolder,
   onStartFolderTranscode,
+  onCancelTask,
   autoTranscode,
   onAutoTranscodeChange,
   statusChips,
 }: {
   watchFolders: WatchFolderResult[];
+  tasks: TaskInfo[];
   onBrowseWatchFolder: () => void;
   onRefreshWatchFolders: () => void;
   wfLoading: boolean;
@@ -1250,6 +1363,7 @@ function WatchFoldersPanel({
   onReplaceWatchFolder: (path: string) => void;
   onBrowseOutputFolder: (path: string) => void;
   onStartFolderTranscode: (files: string[]) => void;
+  onCancelTask: (taskID: string) => void;
   autoTranscode: boolean;
   onAutoTranscodeChange: React.Dispatch<React.SetStateAction<boolean>>;
   statusChips?: React.ReactNode;
@@ -1268,12 +1382,19 @@ function WatchFoldersPanel({
       <div className="watch-folder-list">
         {watchFolders.map((wf) => {
           const outputPath = outputFolderPath(wf.folder);
-          const needsCustomOutput = wf.folder.output_dest === 'custom' && !wf.folder.output_dir;
-          const outputUnset = !wf.folder.output_dest;
+          const outputDest = normalizedOutputDest(wf.folder);
+          const needsCustomOutput = outputDest === 'custom' && !wf.folder.output_dir;
+          const outputUnset = !outputDest;
           const taskName = wf.folder.label || folderName(wf.folder.path);
           const folderFiles = wf.files.map((file) => file.path);
+          const activeTask = tasks.find((task) => isActiveTranscodeTask(task) && taskTouchesFolder(task, wf.folder.path));
+          const activeProgress = activeTask ? taskProgressPercent(activeTask) : 0;
           return (
-            <div key={wf.folder.path} className="watch-folder-card">
+            <div
+              key={wf.folder.path}
+              className={`watch-folder-card ${activeTask ? 'is-running' : ''}`}
+              style={activeTask ? ({ '--watch-folder-progress': `${activeProgress}%` } as React.CSSProperties) : undefined}
+            >
               <div className="watch-folder-card-head">
                 <div className="watch-folder-identity">
                   <span className="watch-folder-icon"><FolderOpen size={28} /></span>
@@ -1286,14 +1407,20 @@ function WatchFoldersPanel({
                       aria-label="目录监控备注名"
                     />
                     <div className="watch-folder-meta">
-                      <span className="watch-folder-state ok">监控中</span>
+                      <span className={`watch-folder-state ${activeTask ? 'running' : 'ok'}`}>
+                        {activeTask ? `转码中 ${activeProgress}%` : '监控中'}
+                      </span>
                       <span>{wf.folder.file_count} 个视频</span>
                       <span>{formatSize(wf.folder.total_size)}</span>
                     </div>
                   </div>
                 </div>
                 <div className="watch-folder-head-actions">
-                  <button className="icon-btn" title="开始转码" disabled={!folderFiles.length || outputUnset || needsCustomOutput} onClick={() => onStartFolderTranscode(folderFiles)}><Play size={16} /></button>
+                  {activeTask ? (
+                    <button className="icon-btn danger" title="取消转码" onClick={() => onCancelTask(activeTask.task_id)}><Square size={16} /></button>
+                  ) : (
+                    <button className="icon-btn" title="开始转码" disabled={!folderFiles.length || outputUnset || needsCustomOutput} onClick={() => onStartFolderTranscode(folderFiles)}><Play size={16} /></button>
+                  )}
                   <button className="icon-btn" title="更多设置" onClick={() => setSettingsFolderPath(wf.folder.path)}><MoreHorizontal size={18} /></button>
                   <button className="icon-btn danger" title="删除" onClick={() => onRemoveWatchFolder(wf.folder.path)}><Trash2 size={16} /></button>
                 </div>
@@ -1317,8 +1444,17 @@ function WatchFoldersPanel({
                   />
                 </div>
                 <div className="watch-folder-next">
-                  <span>下次</span>
-                  <strong>-</strong>
+                  {activeTask ? (
+                    <>
+                      <span>进度</span>
+                      <strong className="watch-folder-progress-text">{activeProgress}%</strong>
+                    </>
+                  ) : (
+                    <>
+                      <span>下次</span>
+                      <strong>-</strong>
+                    </>
+                  )}
                 </div>
               </div>
             </div>
@@ -1333,6 +1469,8 @@ function WatchFoldersPanel({
           onUpdateFolder={onUpdateFolder}
           onBrowseOutputFolder={onBrowseOutputFolder}
           onStartFolderTranscode={onStartFolderTranscode}
+          onCancelTask={onCancelTask}
+          activeTask={tasks.find((task) => isActiveTranscodeTask(task) && taskTouchesFolder(task, settingsFolder.folder.path)) ?? null}
           autoTranscode={autoTranscode}
           onAutoTranscodeChange={onAutoTranscodeChange}
         />
@@ -1347,6 +1485,8 @@ function WatchFolderSettingsModal({
   onUpdateFolder,
   onBrowseOutputFolder,
   onStartFolderTranscode,
+  onCancelTask,
+  activeTask,
   autoTranscode,
   onAutoTranscodeChange,
 }: {
@@ -1355,11 +1495,14 @@ function WatchFolderSettingsModal({
   onUpdateFolder: (path: string, patch: Partial<Pick<WatchFolder, 'label' | 'output_dest' | 'output_dir'>>) => void;
   onBrowseOutputFolder: (path: string) => void;
   onStartFolderTranscode: (files: string[]) => void;
+  onCancelTask: (taskID: string) => void;
+  activeTask: TaskInfo | null;
   autoTranscode: boolean;
   onAutoTranscodeChange: React.Dispatch<React.SetStateAction<boolean>>;
 }) {
   const [activeTab, setActiveTab] = useState<'output' | 'action' | 'advanced'>('output');
   const outputPath = outputFolderPath(wf.folder);
+  const outputDest = normalizedOutputDest(wf.folder);
   const folderFiles = wf.files.map((file) => file.path);
   const outputOptions = [
     { value: 'beside', title: '源文件旁', detail: '转码后文件和源文件放在同一目录' },
@@ -1395,7 +1538,7 @@ function WatchFolderSettingsModal({
                 {outputOptions.map((option) => (
                   <button
                     key={option.value}
-                    className={`watch-output-option ${wf.folder.output_dest === option.value ? 'active' : ''}`}
+                    className={`watch-output-option ${outputDest === option.value ? 'active' : ''}`}
                     onClick={() => onUpdateFolder(wf.folder.path, { output_dest: option.value })}
                   >
                     <span className="radio-dot" aria-hidden="true" />
@@ -1406,7 +1549,7 @@ function WatchFolderSettingsModal({
                   </button>
                 ))}
               </div>
-              {wf.folder.output_dest === 'custom' && (
+              {outputDest === 'custom' && (
                 <button className="btn" onClick={() => onBrowseOutputFolder(wf.folder.path)}><FolderOpen size={16} />选择目标目录</button>
               )}
             </div>
@@ -1417,9 +1560,13 @@ function WatchFolderSettingsModal({
               <div className="watch-settings-summary">
                 <span>待处理文件</span>
                 <strong>{wf.files.length} 个</strong>
-                <small>{!wf.folder.output_dest ? '请先设置输出方式' : formatSize(wf.folder.total_size)}</small>
+                <small>{!outputDest ? '请先设置输出方式' : formatSize(wf.folder.total_size)}</small>
               </div>
-              <button className="btn primary" disabled={!folderFiles.length || !wf.folder.output_dest || (wf.folder.output_dest === 'custom' && !wf.folder.output_dir)} onClick={() => onStartFolderTranscode(folderFiles)}><Play size={16} />开始转码</button>
+              {activeTask ? (
+                <button className="btn danger" onClick={() => onCancelTask(activeTask.task_id)}><Square size={16} />取消转码</button>
+              ) : (
+                <button className="btn primary" disabled={!folderFiles.length || !outputDest || (outputDest === 'custom' && !wf.folder.output_dir)} onClick={() => onStartFolderTranscode(folderFiles)}><Play size={16} />开始转码</button>
+              )}
             </div>
           )}
 
@@ -1471,13 +1618,14 @@ function FolderPathCard({ title, path, detail, action, muted = false, warning = 
 }
 
 function outputFolderPath(folder: WatchFolder) {
-  if (!folder.output_dest) {
+  const outputDest = normalizedOutputDest(folder);
+  if (!outputDest) {
     return { label: '未设置输出', path: '', detail: '请选择输出方式' };
   }
-  if (folder.output_dest === 'subfolder') {
+  if (outputDest === 'subfolder') {
     return { label: 'AV1子目录', path: joinPath(folder.path, 'AV1'), detail: '输出到监控目录下的 AV1 文件夹' };
   }
-  if (folder.output_dest === 'custom') {
+  if (outputDest === 'custom') {
     return {
       label: folder.output_dir ? folderName(folder.output_dir) : '选择目标目录',
       path: folder.output_dir || '点击选择转码输出位置',
@@ -1485,6 +1633,13 @@ function outputFolderPath(folder: WatchFolder) {
     };
   }
   return { label: folder.label || folderName(folder.path), path: folder.path, detail: '输出到源文件所在目录' };
+}
+
+function normalizedOutputDest(folder: WatchFolder) {
+  if (folder.output_dest === 'custom' && folder.output_dir && sameFolderPath(folder.output_dir, folder.path)) {
+    return 'beside';
+  }
+  return folder.output_dest || '';
 }
 
 function MetricCard({
@@ -1568,6 +1723,7 @@ function FileManagerPage({
   selectedPath,
   data,
   loading,
+  tasks,
   actions,
   items,
   filteredItems,
@@ -1583,6 +1739,7 @@ function FileManagerPage({
   selectedPath: string;
   data: ManagedFolderResponse | null;
   loading: boolean;
+  tasks: TaskInfo[];
   actions: ManagedStatus[];
   items: ManagedFileItem[];
   filteredItems: ManagedFileItem[];
@@ -1594,12 +1751,43 @@ function FileManagerPage({
   onReport: () => void;
   onCancel: () => void;
 }) {
+  const [justCompleted, setJustCompleted] = useState<Set<string>>(() => new Set());
+  const previousRunningRef = useRef<Set<string>>(new Set());
   const statusCounts = useMemo(() => {
-    const counts: Record<ManagedStatus, number> = { keep: 0, add: 0, force: 0 };
+    const counts: Record<ManagedStatus, number> = { keep: 0, add: 0, force: 0, running: 0 };
     for (const item of items) counts[item.status] += 1;
     return counts;
   }, [items]);
   const progress = Math.round(data?.summary.progress || 0);
+  const targetProgress = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const task of tasks) {
+      if (task.status !== 'running' && task.status !== 'pending') continue;
+      if (!task.output_path) continue;
+      const value = task.status === 'pending' ? 0 : Math.max(0, Math.min(100, task.current_file_progress || task.progress || 0));
+      map.set(task.output_path, value);
+    }
+    return map;
+  }, [tasks]);
+
+  useEffect(() => {
+    const running = new Set(items.filter((item) => item.status === 'running').map((item) => item.id));
+    const completed = [...previousRunningRef.current].filter((id) => {
+      const item = items.find((candidate) => candidate.id === id);
+      return item && item.status === 'keep' && !running.has(id);
+    });
+    previousRunningRef.current = running;
+    if (!completed.length) return;
+    setJustCompleted((old) => new Set([...old, ...completed]));
+    const timer = window.setTimeout(() => {
+      setJustCompleted((old) => {
+        const next = new Set(old);
+        completed.forEach((id) => next.delete(id));
+        return next;
+      });
+    }, 1000);
+    return () => window.clearTimeout(timer);
+  }, [items]);
 
   return (
     <section className="file-manager" aria-label="文件管理">
@@ -1631,21 +1819,29 @@ function FileManagerPage({
             <div className="file-manager-stats">
               <b>{formatSize(data?.summary.source_size || 0)}</b>
               <b>{data?.summary.file_count || 0} 个文件</b>
-              <b>创建 {formatDateTime(data?.summary.created_at)}</b>
-              <b>结束 {formatDateTime(data?.summary.finished_at)}</b>
-              <b>累计 {formatDuration(data?.summary.duration_sec || 0)}</b>
+              <b>上次开始 {formatDateTime(data?.summary.created_at)}</b>
+              <b>上次结束 {formatDateTime(data?.summary.finished_at)}</b>
+              <b>上次运行时长 {formatDuration(data?.summary.duration_sec || 0)}</b>
             </div>
           </div>
           <div className="file-manager-progress">
             <strong>{progress}%</strong>
             <span>当前任务进度</span>
             <button className="btn" disabled={!data?.summary.active_task_id} onClick={onCancel}><Square size={15} />取消</button>
-            <button className="icon-btn" title="刷新" onClick={onRefresh}>{loading ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}</button>
+            <button className="icon-btn file-manager-refresh" title="刷新" onClick={onRefresh}><RefreshCw className={loading ? 'animate-spin' : ''} size={16} /></button>
           </div>
         </div>
 
         <div className="file-compare-list">
-          {filteredItems.map((item) => <FileCompareRow key={item.id} item={item} onToggleStatus={() => onToggleItemStatus(item)} />)}
+          {filteredItems.map((item) => (
+            <FileCompareRow
+              key={item.id}
+              item={item}
+              progress={targetProgress.get(item.target.path) || 0}
+              completedFlash={justCompleted.has(item.id)}
+              onToggleStatus={() => onToggleItemStatus(item)}
+            />
+          ))}
           {!filteredItems.length && <div className="empty-state compact">{loading ? '正在读取文件对比' : '当前筛选下没有文件'}</div>}
         </div>
 
@@ -1653,6 +1849,7 @@ function FileManagerPage({
           <StatusFilterButton status="keep" active={actions.includes('keep')} count={statusCounts.keep} onClick={() => onToggleAction('keep')} />
           <StatusFilterButton status="add" active={actions.includes('add')} count={statusCounts.add} onClick={() => onToggleAction('add')} />
           <StatusFilterButton status="force" active={actions.includes('force')} count={statusCounts.force} onClick={() => onToggleAction('force')} />
+          <StatusFilterButton status="running" active={actions.includes('running')} count={statusCounts.running} onClick={() => onToggleAction('running')} />
           <span className="file-manager-action-hint">高亮项会显示在列表中</span>
         </div>
       </section>
@@ -1660,7 +1857,17 @@ function FileManagerPage({
   );
 }
 
-function FileCompareRow({ item, onToggleStatus }: { item: ManagedFileItem; onToggleStatus: () => void }) {
+function FileCompareRow({
+  item,
+  progress,
+  completedFlash,
+  onToggleStatus,
+}: {
+  item: ManagedFileItem;
+  progress: number;
+  completedFlash: boolean;
+  onToggleStatus: () => void;
+}) {
   const canToggle = item.status === 'keep' || item.status === 'add';
   return (
     <div className={`file-compare-row status-${item.status}`}>
@@ -1669,23 +1876,49 @@ function FileCompareRow({ item, onToggleStatus }: { item: ManagedFileItem; onTog
         className={`file-compare-action ${item.status}`}
         type="button"
         disabled={!canToggle}
-        title={canToggle ? '切换保持/新增' : '强制转码'}
+        title={item.status === 'running' ? '正在转码' : canToggle ? '切换保持/新增' : '强制转码'}
         onClick={canToggle ? onToggleStatus : undefined}
       >
         {item.status === 'keep' && <span className="action-minus" />}
         {item.status === 'add' && <><Plus size={14} className="action-plus" /><ChevronRight size={23} /></>}
         {item.status === 'force' && <ZapIcon />}
+        {item.status === 'running' && <Loader2 className="animate-spin" size={18} />}
       </button>
-      <FileSideCard side={item.target} muted={!item.target.exists} message={item.message} />
+      <FileSideCard
+        side={item.target}
+        muted={!item.target.exists}
+        message={item.status === 'add' ? undefined : item.message}
+        progress={item.status === 'running' ? progress : 0}
+        progressing={item.status === 'running'}
+        completedFlash={completedFlash}
+      />
     </div>
   );
 }
 
-function FileSideCard({ side, muted = false, message }: { side: ManagedFileSide; muted?: boolean; message?: string }) {
+function FileSideCard({
+  side,
+  muted = false,
+  message,
+  progress = 0,
+  progressing = false,
+  completedFlash = false,
+}: {
+  side: ManagedFileSide;
+  muted?: boolean;
+  message?: string;
+  progress?: number;
+  progressing?: boolean;
+  completedFlash?: boolean;
+}) {
   const tags = mediaTags(side.meta);
   const displayTitle = side.relative_path || (side.relative_dir ? `${side.relative_dir}/${side.name}` : side.name);
+  const progressValue = Math.max(0, Math.min(100, progress));
   return (
-    <div className={`file-side-card ${muted ? 'muted' : ''}`}>
+    <div
+      className={`file-side-card ${muted ? 'muted' : ''} ${progressing ? 'progressing' : ''} ${completedFlash ? 'completed-flash' : ''}`}
+      style={{ '--file-progress': `${progressValue}%` } as React.CSSProperties}
+    >
       <h3 title={side.path}>{displayTitle}</h3>
       <div className="file-side-meta">
         {tags.map((tag) => <span key={tag.label} className={`file-tag ${tag.tone}`}>{tag.label}</span>)}
@@ -1710,6 +1943,7 @@ function StatusFilterButton({ status, active, count, onClick }: { status: Manage
 function StatusGlyph({ status }: { status: ManagedStatus }) {
   if (status === 'keep') return <span className="action-minus" />;
   if (status === 'add') return <span className="status-add-glyph"><Plus size={12} /><ChevronRight size={18} /></span>;
+  if (status === 'running') return <Loader2 className="animate-spin" size={16} />;
   return <ZapIcon />;
 }
 
@@ -1882,8 +2116,11 @@ function PresetsWorkspace({
   onDelete: (preset: Preset) => void;
   onReset: (preset: Preset) => void;
 }) {
+  const [vendorFilter, setVendorFilter] = useState<PresetVendorFilter>('cpu');
   const selectedPreset = presets.find((preset) => preset.name === editingPreset) ?? null;
   const creating = editingPreset === '__new__';
+  const filteredPresets = presets.filter((preset) => presetVendor(preset.encoder) === vendorFilter);
+  const creatingVisible = creating && presetVendor(newPreset.encoder) === vendorFilter;
   const previewPreset: Preset | null = creating
     ? {
       name: newPreset.name || '新建预设',
@@ -1910,9 +2147,21 @@ function PresetsWorkspace({
         <div className="presets-list-head">
           <div className="section-title"><Save size={18} />预设列表</div>
           <button className="btn primary" onClick={onCreate}><Plus size={16} />新建</button>
+          <div className="preset-vendor-filter" aria-label="预设厂商筛选">
+            {presetVendorFilters.map((filter) => (
+              <button
+                key={filter.value}
+                className={vendorFilter === filter.value ? 'active' : ''}
+                type="button"
+                onClick={() => setVendorFilter(filter.value)}
+              >
+                {filter.label}
+              </button>
+            ))}
+          </div>
         </div>
         <div className="presets-list">
-          {creating && (
+          {creatingVisible && (
             <button className="preset-list-item draft active" onClick={onCreate}>
               <span>
                 <strong>{newPreset.name || '新建预设'}</strong>
@@ -1921,7 +2170,7 @@ function PresetsWorkspace({
               <b>{encoderKindLabel(newPreset.encoder)}</b>
             </button>
           )}
-          {presets.map((preset) => {
+          {filteredPresets.map((preset) => {
             const active = selectedPreset?.name === preset.name;
             return (
               <button key={preset.name} className={`preset-list-item ${active ? 'active' : ''}`} onClick={() => onSelect(preset)}>
@@ -1936,7 +2185,7 @@ function PresetsWorkspace({
               </button>
             );
           })}
-          {!presets.length && !creating && <div className="empty-state compact">暂无预设</div>}
+          {!filteredPresets.length && !creatingVisible && <div className="empty-state compact">暂无该分类预设</div>}
         </div>
       </aside>
 
@@ -2058,9 +2307,16 @@ function PresetsWorkspace({
 
 function encoderKindLabel(encoder: string) {
   if (encoder.includes('nvenc')) return 'NVIDIA';
-  if (encoder.includes('qsv')) return 'Intel';
+  if (encoder.includes('qsv')) return 'INTEL';
   if (encoder.includes('amf')) return 'AMD';
   return 'CPU';
+}
+
+function presetVendor(encoder: string): PresetVendorFilter {
+  if (encoder.includes('nvenc')) return 'nvidia';
+  if (encoder.includes('qsv')) return 'intel';
+  if (encoder.includes('amf')) return 'amd';
+  return 'cpu';
 }
 
 const leaderboardEncoderOrder = ['libsvtav1', 'libaom-av1', 'librav1e', 'av1_qsv', 'av1_nvenc'];
@@ -2214,7 +2470,7 @@ function HardwareSummaryCard({ hardware, hwLoading, onRefresh }: { hardware: Har
   const available = hardware.encoders.filter((encoder) => encoder.available);
   const hardwareAvailable = available.filter((encoder) => encoder.hw_type !== 'software');
   const softwareAvailable = available.filter((encoder) => encoder.hw_type === 'software');
-  const activeVendor = vendors.find((vendor) => hardwareAvailable.some((encoder) => encoder.hw_type === vendor)) || vendors[0];
+  const activeVendor = vendors.find((vendor) => hardwareAvailable.some((encoder) => encoder.hw_type === vendor)) || '';
   const decodeFormats = summarizeCodecBadges(hardwareAvailable);
   const encodeFormats = summarizeCodecBadges(available);
 
@@ -2513,12 +2769,45 @@ function fileBelongsToWatchFolder(file: string, wf: WatchFolderResult) {
 }
 
 function pathBelongsToFolder(path: string, folder: string) {
-  return path === folder || path.startsWith(`${folder}/`) || path.startsWith(`${folder}\\`);
+  const normalizedPath = path.replace(/\\/g, '/').replace(/\/+$/, '');
+  const normalizedFolder = folder.replace(/\\/g, '/').replace(/\/+$/, '');
+  if (!normalizedFolder) return Boolean(normalizedPath);
+  return normalizedPath === normalizedFolder || normalizedPath.startsWith(`${normalizedFolder}/`);
+}
+
+function sameFolderPath(left: string, right: string) {
+  return normalizeFolderPath(left) === normalizeFolderPath(right);
+}
+
+function normalizeFolderPath(path: string) {
+  return path.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+}
+
+function isActiveTranscodeTask(task: TaskInfo) {
+  return task.status === 'running' || task.status === 'pending';
+}
+
+function taskProgressPercent(task: TaskInfo) {
+  const value = task.status === 'pending'
+    ? 0
+    : task.current_file_progress || task.progress || 0;
+  return Math.round(Math.max(0, Math.min(100, value)));
+}
+
+function makeResourcePoints(value: number) {
+  const current = Math.max(0, Math.min(100, value || 0));
+  return [current * 0.74, current * 0.86, current * 0.79, current * 0.93, current * 0.88, current];
+}
+
+function taskTouchesFolder(task: TaskInfo, folder: string) {
+  if (task.current_file && pathBelongsToFolder(task.current_file, folder)) return true;
+  return Boolean(task.request?.files?.some((file) => pathBelongsToFolder(file, folder)));
 }
 
 function managedStatusLabel(status: ManagedStatus) {
   if (status === 'keep') return '保持不动';
   if (status === 'add') return '转码新增';
+  if (status === 'running') return '处理中';
   return '强制转码';
 }
 
@@ -2529,6 +2818,9 @@ function mediaTags(meta?: ManagedFileMeta) {
   if (meta.audio_codec) tags.push({ label: meta.audio_codec.toUpperCase(), tone: 'audio' });
   if (meta.channels) tags.push({ label: `${meta.channels} 声道`, tone: 'channel' });
   if (meta.resolution) tags.push({ label: meta.resolution, tone: 'resolution' });
+  if (meta.frame_count) tags.push({ label: `${formatCompactNumber(meta.frame_count)} 帧`, tone: 'frame' });
+  else if (meta.frame_rate) tags.push({ label: meta.frame_rate, tone: 'frame' });
+  if (meta.bit_depth) tags.push({ label: `${meta.bit_depth}bit`, tone: 'depth' });
   if (meta.bitrate) tags.push({ label: formatBitrate(meta.bitrate), tone: 'bitrate' });
   return tags;
 }
