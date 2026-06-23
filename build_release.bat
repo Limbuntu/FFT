@@ -24,7 +24,7 @@ set GOPATH=%CD%\.cache\gopath
 set GOCACHE=%CD%\.cache\go-build
 set GOOS=windows
 set GOARCH=amd64
-"%GO_BIN%" build -trimpath -ldflags="-s -w" -o dist\FFT\FFT.exe .\cmd\server || exit /b 1
+"%GO_BIN%" build -trimpath -ldflags="-s -w -X github.com/limbuntu/fft/internal/config.defaultOpenBrowser=true" -o dist\FFT\FFT.exe .\cmd\server || exit /b 1
 
 xcopy /e /i /q frontend\dist dist\FFT\frontend\dist >nul
 copy bench_leaderboard.json dist\FFT\bench_leaderboard.json >nul
@@ -37,11 +37,11 @@ echo   - ffmpeg.exe and ffprobe.exe must be in PATH
 echo.
 echo Usage:
 echo   1. Double-click FFT.exe or run it from a terminal
-echo   2. Open http://127.0.0.1:8166
+echo   2. The browser opens http://127.0.0.1:8166 automatically
 echo.
 echo Environment variables:
 echo   FFT_PORT=8166
-echo   FFT_OPEN_BROWSER=true
+echo   FFT_OPEN_BROWSER=false disables automatic browser opening
 ) > dist\FFT\README.txt
 
 if not exist release mkdir release

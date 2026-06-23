@@ -27,7 +27,7 @@ COPY bench_leaderboard.json ./
 COPY --from=frontend /src/frontend/dist ./frontend/dist
 
 RUN CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
-    go build -trimpath -ldflags="-s -w" -o /out/FFT-windows-x64/FFT.exe ./cmd/server
+    go build -trimpath -ldflags="-s -w -X github.com/limbuntu/fft/internal/config.defaultOpenBrowser=true" -o /out/FFT-windows-x64/FFT.exe ./cmd/server
 
 RUN mkdir -p /out/FFT-windows-x64/frontend && \
     cp -R frontend/dist /out/FFT-windows-x64/frontend/dist && \
@@ -40,11 +40,11 @@ RUN mkdir -p /out/FFT-windows-x64/frontend && \
       '' \
       'Usage:' \
       '  1. Double-click FFT.exe or run it from a terminal' \
-      '  2. Open http://127.0.0.1:8166' \
+      '  2. The browser opens http://127.0.0.1:8166 automatically' \
       '' \
       'Environment variables:' \
       '  FFT_PORT=8166' \
-      '  FFT_OPEN_BROWSER=true' \
+      '  FFT_OPEN_BROWSER=false disables automatic browser opening' \
       > /out/FFT-windows-x64/README.txt
 
 RUN cd /out && zip -r FFT-windows-x64-lite.zip FFT-windows-x64

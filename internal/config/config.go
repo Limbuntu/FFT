@@ -18,6 +18,8 @@ type Config struct {
 	OpenBrowser  bool
 }
 
+var defaultOpenBrowser = "false"
+
 func Load() Config {
 	root := mustGetwd()
 	dataDir := env("FFT_DATA_DIR", root)
@@ -37,7 +39,7 @@ func Load() Config {
 		LogFile:      logFile,
 		Host:         env("FFT_HOST", "0.0.0.0"),
 		Port:         env("FFT_PORT", "8166"),
-		OpenBrowser:  envBool("FFT_OPEN_BROWSER", false),
+		OpenBrowser:  envBool("FFT_OPEN_BROWSER", boolDefault(defaultOpenBrowser, false)),
 	}
 }
 
@@ -50,6 +52,17 @@ func env(key, fallback string) string {
 
 func envBool(key string, fallback bool) bool {
 	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	ok, err := strconv.ParseBool(value)
+	if err != nil {
+		return fallback
+	}
+	return ok
+}
+
+func boolDefault(value string, fallback bool) bool {
 	if value == "" {
 		return fallback
 	}
