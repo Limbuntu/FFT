@@ -167,7 +167,8 @@ func (s *Service) run(taskID string) {
 			return
 		}
 		fileStartedAt := time.Now()
-		dst, changed, originalExt, err := buildOutputPath(src, task.Request)
+		copyAV1 := shouldCopyAV1(src, task.Request)
+		dst, changed, originalExt, err := buildOutputPath(src, task.Request, copyAV1)
 		if err != nil {
 			s.fail(taskID, err.Error())
 			return
@@ -204,6 +205,32 @@ func (s *Service) run(taskID string) {
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			s.fail(taskID, err.Error())
 			return
+		}
+		if copyAV1 {
+			if err := copyFile(src, dst); err != nil {
+				s.fail(taskID, err.Error())
+				return
+			}
+			fileFinishedAt := time.Now()
+			originalSize := fileSize(src)
+			outputSize := fileSize(dst)
+			s.update(taskID, func(t *models.TaskInfo) {
+				t.CurrentFileProgress = 100
+				t.Progress = round1((float64(idx+1) / float64(len(t.Request.Files))) * 100)
+				t.Speed = ""
+				t.Results = append(t.Results, models.TaskFileResult{
+					InputPath:    src,
+					OutputPath:   dst,
+					OriginalSize: originalSize,
+					OutputSize:   outputSize,
+					StartedAt:    fileStartedAt,
+					FinishedAt:   fileFinishedAt,
+					DurationSec:  fileFinishedAt.Sub(fileStartedAt).Seconds(),
+				})
+			})
+			log.Printf("Copied AV1 source for %s -> %s", redactPathForLog(src), redactPathForLog(dst))
+			s.notify(taskID)
+			continue
 		}
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -595,16 +622,16 @@ func fileSize(path string) int64 {
 	return st.Size()
 }
 
-func buildOutputPath(src string, req models.TranscodeRequest) (string, bool, string, error) {
+func buildOutputPath(src string, req models.TranscodeRequest, preserveSourceContainer bool) (string, bool, string, error) {
 	base := strings.TrimSuffix(src, filepath.Ext(src))
 	srcExt := filepath.Ext(src)
 	ext := srcExt
-	if req.OutputExt != "auto" && req.OutputExt != "" {
+	if !preserveSourceContainer && req.OutputExt != "auto" && req.OutputExt != "" {
 		ext = req.OutputExt
 	}
 	changed := false
 	originalExt := ext
-	if incompatibleAV1Exts[strings.ToLower(ext)] {
+	if !preserveSourceContainer && incompatibleAV1Exts[strings.ToLower(ext)] {
 		ext = ".mp4"
 		changed = true
 	}
@@ -613,6 +640,9 @@ func buildOutputPath(src string, req models.TranscodeRequest) (string, bool, str
 	dest := req.OutputDest
 	dir := req.OutputDir
 	suffix := req.Suffix
+	if preserveSourceContainer {
+		suffix = ""
+	}
 	if fileOutput != nil {
 		if value := fileOutput["output_dest"]; value != "" {
 			dest = value
@@ -620,7 +650,7 @@ func buildOutputPath(src string, req models.TranscodeRequest) (string, bool, str
 		if value := fileOutput["output_dir"]; value != "" {
 			dir = value
 		}
-		if value := fileOutput["suffix"]; value != "" {
+		if value, ok := fileOutput["suffix"]; ok && !preserveSourceContainer {
 			suffix = value
 		}
 	}
@@ -639,6 +669,54 @@ func buildOutputPath(src string, req models.TranscodeRequest) (string, bool, str
 		ext = ".mkv"
 	}
 	return filepath.Join(outDir, filepath.Base(base)+suffix+ext), changed, originalExt, nil
+}
+
+func shouldCopyAV1(src string, req models.TranscodeRequest) bool {
+	fileOutput := req.FileOutputs[src]
+	return fileOutput != nil && fileOutput["copy_av1"] == "true" && isAV1Codec(probeVideoCodec(src))
+}
+
+func probeVideoCodec(file string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name", "-of", "default=noprint_wrappers=1:nokey=1", file)
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func isAV1Codec(codec string) bool {
+	codec = strings.ToLower(strings.TrimSpace(codec))
+	return codec == "av1" || codec == "libsvtav1" || codec == "libaom-av1" || codec == "librav1e"
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = out.Close()
+	}()
+	if _, err := io.Copy(out, in); err != nil {
+		_ = os.Remove(dst)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(dst)
+		return err
+	}
+	if info, err := in.Stat(); err == nil {
+		_ = os.Chmod(dst, info.Mode())
+	}
+	return nil
 }
 
 func buildFFmpegArgs(src, dst string, req models.TranscodeRequest) []string {

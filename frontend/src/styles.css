@@ -181,6 +181,7 @@ code {
 
 .sidebar-brand-text {
   min-width: 0;
+  flex: 1 1 auto;
 }
 
 .sidebar-collapse-btn {
@@ -224,9 +225,13 @@ code {
 }
 
 .sidebar-brand p {
+  overflow: hidden;
   margin: 0.2rem 0 0;
   color: var(--color-muted);
   font-size: 0.75rem;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .sidebar-nav {
@@ -539,10 +544,12 @@ code {
 }
 
 .field-label-row {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
+  justify-content: flex-start;
+  gap: 0.45rem;
+  width: fit-content;
+  max-width: 100%;
 }
 
 .mini-toggle-input {
@@ -550,6 +557,7 @@ code {
   width: 2.1rem;
   height: 1.15rem;
   flex: 0 0 auto;
+  margin: 0;
   appearance: none;
   border: 1px solid var(--color-line-strong);
   border-radius: 999px;
@@ -1204,9 +1212,10 @@ code {
 .file-manager {
   display: grid;
   grid-template-columns: minmax(13rem, 0.28fr) minmax(0, 1fr);
-  align-items: start;
+  align-items: stretch;
   gap: 1rem;
-  min-height: 0;
+  height: calc(100vh - 1.8rem);
+  min-height: 32rem;
 }
 
 .file-manager-rail,
@@ -1221,7 +1230,7 @@ code {
 .file-manager-rail {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  max-height: calc(100vh - 1.8rem);
+  height: 100%;
   overflow: hidden;
 }
 
@@ -1289,7 +1298,8 @@ code {
 .file-manager-main {
   display: flex;
   flex-direction: column;
-  max-height: calc(100vh - 1.8rem);
+  height: 100%;
+  min-height: 0;
   overflow: hidden;
 }
 
@@ -1309,10 +1319,35 @@ code {
   min-width: 0;
 }
 
+.file-manager-title-row {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem;
+}
+
 .file-manager-title h2 {
   margin: 0;
   font-size: 1.15rem;
   font-weight: 820;
+}
+
+.file-manager-preset {
+  display: inline-flex;
+  max-width: min(42rem, 100%);
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid var(--color-line);
+  border-radius: 999px;
+  background: var(--color-table-head);
+  color: var(--color-soft);
+  padding: 0.18rem 0.52rem;
+  font-size: 0.72rem;
+  font-weight: 760;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .file-manager-title p {
@@ -2700,13 +2735,15 @@ code {
   background: var(--color-panel);
 }
 
-.task-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  margin-top: 0.75rem;
-  padding-top: 0.75rem;
-  border-top: 1px solid var(--color-line);
+.task-report-btn {
+  width: 1.8rem;
+  height: 1.8rem;
+  min-height: 1.8rem;
+  color: var(--color-soft);
+}
+
+.task-report-btn:hover {
+  color: var(--color-ink);
 }
 
 .data-table {
@@ -2868,7 +2905,7 @@ code {
   background: var(--color-brand);
 }
 
-.score-track span {
+.score-value {
   position: absolute;
   right: 0.5rem;
   top: 50%;
@@ -2876,6 +2913,11 @@ code {
   color: var(--color-ink);
   font-size: 0.75rem;
   font-weight: 700;
+}
+
+.score-value.mine {
+  color: var(--color-brand-contrast);
+  text-shadow: 0 1px 1px rgb(0 0 0 / 0.18);
 }
 
 .notice {
@@ -3310,6 +3352,17 @@ code {
   .file-status-strip {
     width: 100%;
     justify-content: flex-start;
+  }
+
+  .file-manager {
+    height: auto;
+    min-height: 0;
+  }
+
+  .file-manager-rail,
+  .file-manager-main {
+    height: auto;
+    max-height: none;
   }
 
   .presets-workspace {

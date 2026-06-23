@@ -209,6 +209,7 @@ type WatchFolder struct {
 	TotalSize  int64  `json:"total_size"`
 	OutputDest string `json:"output_dest"`
 	OutputDir  string `json:"output_dir"`
+	CopyAV1    bool   `json:"copy_av1"`
 }
 
 type WatchFolderScanResult struct {

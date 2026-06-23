@@ -258,6 +258,7 @@ func (s *Server) addWatchFolder(c *gin.Context) {
 		"label":       record.Label,
 		"output_dest": record.OutputDest,
 		"output_dir":  record.OutputDir,
+		"copy_av1":    record.CopyAV1,
 	})
 }
 
@@ -266,6 +267,7 @@ type updateWatchFolderReq struct {
 	OutputDir  *string `json:"output_dir"`
 	Path       *string `json:"path"`
 	Label      *string `json:"label"`
+	CopyAV1    *bool   `json:"copy_av1"`
 }
 
 func (s *Server) updateWatchFolder(c *gin.Context) {
@@ -314,10 +316,10 @@ func (s *Server) updateWatchFolder(c *gin.Context) {
 				outputDest, outputDir = normalizeWatchFolderOutput(path, outputDest, outputDir)
 				req.OutputDest = &outputDest
 				req.OutputDir = &outputDir
-				record, err = s.db.UpdateWatchFolder(path, req.OutputDest, req.OutputDir, req.Label)
+				record, err = s.db.UpdateWatchFolder(path, req.OutputDest, req.OutputDir, req.Label, req.CopyAV1)
 			}
 		} else {
-			record, err = s.db.UpdateWatchFolder(path, req.OutputDest, req.OutputDir, req.Label)
+			record, err = s.db.UpdateWatchFolder(path, req.OutputDest, req.OutputDir, req.Label, req.CopyAV1)
 		}
 	}
 	if err != nil {
@@ -337,6 +339,7 @@ func (s *Server) updateWatchFolder(c *gin.Context) {
 		"label":       record.Label,
 		"output_dest": record.OutputDest,
 		"output_dir":  record.OutputDir,
+		"copy_av1":    record.CopyAV1,
 	})
 }
 
@@ -387,7 +390,9 @@ func (s *Server) manageWatchFolder(c *gin.Context) {
 		if relDir == "." {
 			relDir = ""
 		}
-		target := targetPathFor(record, file.Path)
+		sourceMeta := probeMediaMeta(file.Path)
+		copyAV1Source := record.CopyAV1 && isAV1Codec(sourceMeta.VideoCodec)
+		target := targetPathFor(record, file.Path, copyAV1Source)
 		var targetErr error
 		var targetFileName string
 		var targetRelativePath string
@@ -404,7 +409,6 @@ func (s *Server) manageWatchFolder(c *gin.Context) {
 				targetSize += targetFileSize
 			}
 		}
-		sourceMeta := probeMediaMeta(file.Path)
 		targetMeta := probeMediaMeta(target)
 		status, message := managedStatus(file.Size, targetFileSize, targetExists, targetErr)
 		if target != "" && activeOutputs[target] {
@@ -412,8 +416,21 @@ func (s *Server) manageWatchFolder(c *gin.Context) {
 			message = "正在转码"
 		}
 		if isAV1Codec(sourceMeta.VideoCodec) {
-			status = "keep"
-			message = "源文件已是 AV1"
+			if record.CopyAV1 {
+				if target == "" {
+					status = "keep"
+					message = "源文件已是 AV1，尚未设置复制目标"
+				} else if !targetExists {
+					status = "add"
+					message = "源文件已是 AV1，将直接复制"
+				} else {
+					status = "keep"
+					message = "AV1 副本已存在"
+				}
+			} else {
+				status = "keep"
+				message = "源文件已是 AV1"
+			}
 		} else if target == "" {
 			message = "尚未设置输出方式"
 		}
@@ -457,6 +474,7 @@ func (s *Server) manageWatchFolder(c *gin.Context) {
 			TotalSize:  sourceSize,
 			OutputDest: record.OutputDest,
 			OutputDir:  record.OutputDir,
+			CopyAV1:    record.CopyAV1,
 		},
 		Summary: managedSummary(record, tasks, len(files), sourceSize, targetSize, targetRoot),
 		Items:   items,
@@ -559,6 +577,10 @@ func (s *Server) startOnlineTranscode(c *gin.Context) {
 		OutputDir:     outputDir,
 		ExtraArgs:     strings.Fields(c.PostForm("extra_args")),
 	}
+	if !s.encoderAvailable(c.Request.Context(), req.Encoder) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Encoder is not available on this host"})
+		return
+	}
 	task, err := s.transcoder.Start(req)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -569,6 +591,16 @@ func (s *Server) startOnlineTranscode(c *gin.Context) {
 		"filename":     file.Filename,
 		"download_url": "/api/online/download/" + task.TaskID,
 	})
+}
+
+func (s *Server) encoderAvailable(ctx context.Context, encoder string) bool {
+	report := s.hardware.Detect(ctx, true)
+	for _, item := range report.Encoders {
+		if item.Name == encoder {
+			return item.Available
+		}
+	}
+	return false
 }
 
 func (s *Server) downloadOnlineResult(c *gin.Context) {
@@ -754,10 +786,11 @@ func targetRootFor(folder fftdb.WatchFolderRecord) string {
 	return ""
 }
 
-func targetPathFor(folder fftdb.WatchFolderRecord, sourcePath string) string {
+func targetPathFor(folder fftdb.WatchFolderRecord, sourcePath string, preserveSourceContainer ...bool) string {
 	if folder.OutputDest == "" {
 		return ""
 	}
+	preserve := len(preserveSourceContainer) > 0 && preserveSourceContainer[0]
 	sourceDir := filepath.Dir(sourcePath)
 	sourceBase := strings.TrimSuffix(filepath.Base(sourcePath), filepath.Ext(sourcePath))
 	relDir := filepath.Dir(relativePath(folder.Path, sourcePath))
@@ -765,7 +798,7 @@ func targetPathFor(folder fftdb.WatchFolderRecord, sourcePath string) string {
 		relDir = ""
 	}
 	ext := filepath.Ext(sourcePath)
-	if incompatibleManagedExts[strings.ToLower(ext)] {
+	if !preserve && incompatibleManagedExts[strings.ToLower(ext)] {
 		ext = ".mp4"
 	}
 	name := sourceBase + "_av1" + ext

@@ -91,7 +91,7 @@ func TestWatchFoldersKeepInsertionOrderAndUpdateLabel(t *testing.T) {
 		t.Fatal(err)
 	}
 	label := "素材备忘"
-	if _, err := db.UpdateWatchFolder("/tmp/z-last-by-name", nil, nil, &label); err != nil {
+	if _, err := db.UpdateWatchFolder("/tmp/z-last-by-name", nil, nil, &label, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -107,5 +107,16 @@ func TestWatchFoldersKeepInsertionOrderAndUpdateLabel(t *testing.T) {
 	}
 	if folders[0].Label != label {
 		t.Fatalf("label = %q, want %q", folders[0].Label, label)
+	}
+	if !folders[0].CopyAV1 || !folders[1].CopyAV1 {
+		t.Fatalf("copy AV1 should default on: %+v", folders)
+	}
+	disabled := false
+	updated, err := db.UpdateWatchFolder("/tmp/z-last-by-name", nil, nil, nil, &disabled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.CopyAV1 {
+		t.Fatalf("copy AV1 was not disabled: %+v", updated)
 	}
 }

@@ -23,6 +23,7 @@ type WatchFolderRecord struct {
 	Label      string
 	OutputDest string
 	OutputDir  string
+	CopyAV1    bool
 }
 
 func Open(path string) (*DB, error) {
@@ -61,6 +62,7 @@ func (d *DB) Migrate() error {
 			label TEXT NOT NULL DEFAULT '',
 			output_dest TEXT NOT NULL DEFAULT '',
 			output_dir TEXT NOT NULL DEFAULT '',
+			copy_av1 INTEGER NOT NULL DEFAULT 1,
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);`,
@@ -109,7 +111,36 @@ func (d *DB) Migrate() error {
 			return err
 		}
 	}
+	if err := d.ensureColumn("watch_folders", "copy_av1", "INTEGER NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (d *DB) ensureColumn(table, column, definition string) error {
+	rows, err := d.db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return rows.Err()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = d.db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + column + ` ` + definition)
+	return err
 }
 
 func (d *DB) ImportLegacyJSON(root string) error {
@@ -126,7 +157,7 @@ func (d *DB) ImportLegacyJSON(root string) error {
 }
 
 func (d *DB) WatchFolders() ([]WatchFolderRecord, error) {
-	rows, err := d.db.Query(`SELECT path, label, output_dest, output_dir FROM watch_folders ORDER BY created_at, rowid`)
+	rows, err := d.db.Query(`SELECT path, label, output_dest, output_dir, copy_av1 FROM watch_folders ORDER BY created_at, rowid`)
 	if err != nil {
 		return nil, err
 	}
@@ -135,7 +166,7 @@ func (d *DB) WatchFolders() ([]WatchFolderRecord, error) {
 	var result []WatchFolderRecord
 	for rows.Next() {
 		var r WatchFolderRecord
-		if err := rows.Scan(&r.Path, &r.Label, &r.OutputDest, &r.OutputDir); err != nil {
+		if err := rows.Scan(&r.Path, &r.Label, &r.OutputDest, &r.OutputDir, &r.CopyAV1); err != nil {
 			return nil, err
 		}
 		result = append(result, r)
@@ -149,8 +180,8 @@ func (d *DB) AddWatchFolder(path, label, outputDest, outputDir string) (WatchFol
 		label = filepath.Base(path)
 	}
 	_, err := d.db.Exec(
-		`INSERT OR IGNORE INTO watch_folders(path, label, output_dest, output_dir, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
+		`INSERT OR IGNORE INTO watch_folders(path, label, output_dest, output_dir, copy_av1, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, 1, ?, ?)`,
 		path, label, outputDest, outputDir, now, now,
 	)
 	if err != nil {
@@ -162,13 +193,13 @@ func (d *DB) AddWatchFolder(path, label, outputDest, outputDir string) (WatchFol
 func (d *DB) WatchFolder(path string) (WatchFolderRecord, error) {
 	var r WatchFolderRecord
 	err := d.db.QueryRow(
-		`SELECT path, label, output_dest, output_dir FROM watch_folders WHERE path = ?`,
+		`SELECT path, label, output_dest, output_dir, copy_av1 FROM watch_folders WHERE path = ?`,
 		path,
-	).Scan(&r.Path, &r.Label, &r.OutputDest, &r.OutputDir)
+	).Scan(&r.Path, &r.Label, &r.OutputDest, &r.OutputDir, &r.CopyAV1)
 	return r, err
 }
 
-func (d *DB) UpdateWatchFolder(path string, outputDest, outputDir, label *string) (WatchFolderRecord, error) {
+func (d *DB) UpdateWatchFolder(path string, outputDest, outputDir, label *string, copyAV1 *bool) (WatchFolderRecord, error) {
 	current, err := d.WatchFolder(path)
 	if err != nil {
 		return WatchFolderRecord{}, err
@@ -185,9 +216,12 @@ func (d *DB) UpdateWatchFolder(path string, outputDest, outputDir, label *string
 	if outputDir != nil {
 		current.OutputDir = *outputDir
 	}
+	if copyAV1 != nil {
+		current.CopyAV1 = *copyAV1
+	}
 	_, err = d.db.Exec(
-		`UPDATE watch_folders SET label = ?, output_dest = ?, output_dir = ?, updated_at = ? WHERE path = ?`,
-		current.Label, current.OutputDest, current.OutputDir, time.Now().Format(time.RFC3339Nano), path,
+		`UPDATE watch_folders SET label = ?, output_dest = ?, output_dir = ?, copy_av1 = ?, updated_at = ? WHERE path = ?`,
+		current.Label, current.OutputDest, current.OutputDir, current.CopyAV1, time.Now().Format(time.RFC3339Nano), path,
 	)
 	if err != nil {
 		return WatchFolderRecord{}, err

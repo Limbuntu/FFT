@@ -1,8 +1,11 @@
 package transcode
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/limbuntu/fft/internal/models"
 )
 
 func TestSanitizeLogTextRedactsSourceAndOutputPaths(t *testing.T) {
@@ -15,5 +18,32 @@ func TestSanitizeLogTextRedactsSourceAndOutputPaths(t *testing.T) {
 	}
 	if !strings.Contains(got, "xxxxx/source clip.mov") || !strings.Contains(got, "xxxxx/source clip_av1.mp4") {
 		t.Fatalf("filenames were not preserved: %s", got)
+	}
+}
+
+func TestBuildOutputPathPreservesSourceContainerWhenCopyingAV1(t *testing.T) {
+	src := filepath.Join("videos", "clip.mov")
+	req := models.TranscodeRequest{
+		OutputExt: "auto",
+		Suffix:    "_av1",
+		FileOutputs: map[string]map[string]string{
+			src: {
+				"output_dest": "custom",
+				"output_dir":  "out",
+				"suffix":      "",
+				"copy_av1":    "true",
+			},
+		},
+	}
+	got, changed, _, err := buildOutputPath(src, req, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed {
+		t.Fatal("copying AV1 should not trigger incompatible container rewrite")
+	}
+	want := filepath.Join("out", "clip.mov")
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }

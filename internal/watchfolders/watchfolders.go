@@ -52,6 +52,7 @@ func (s *Service) ScanAll() ([]models.WatchFolderScanResult, error) {
 				TotalSize:  total,
 				OutputDest: record.OutputDest,
 				OutputDir:  record.OutputDir,
+				CopyAV1:    record.CopyAV1,
 			},
 			Files: files,
 		})
