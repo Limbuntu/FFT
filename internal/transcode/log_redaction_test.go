@@ -47,3 +47,18 @@ func TestBuildOutputPathPreservesSourceContainerWhenCopyingAV1(t *testing.T) {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
+
+func TestQSVPresetValueClampsNumericPreset(t *testing.T) {
+	tests := map[models.PresetValue]string{
+		"8":         "7",
+		"99":        "7",
+		"-1":        "0",
+		"fast":      "4",
+		"ultrafast": "7",
+	}
+	for input, want := range tests {
+		if got := qsvPresetValue(input); got != want {
+			t.Fatalf("qsvPresetValue(%q) = %q, want %q", input, got, want)
+		}
+	}
+}

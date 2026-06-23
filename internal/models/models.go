@@ -210,6 +210,7 @@ type WatchFolder struct {
 	OutputDest string `json:"output_dest"`
 	OutputDir  string `json:"output_dir"`
 	CopyAV1    bool   `json:"copy_av1"`
+	PresetName string `json:"preset_name"`
 }
 
 type WatchFolderScanResult struct {

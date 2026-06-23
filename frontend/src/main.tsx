@@ -76,9 +76,10 @@ type WatchFolder = {
   output_dest: string;
   output_dir: string;
   copy_av1: boolean;
+  preset_name: string;
 };
 
-type WatchFolderPatch = Partial<Pick<WatchFolder, 'label' | 'output_dest' | 'output_dir' | 'copy_av1'>>;
+type WatchFolderPatch = Partial<Pick<WatchFolder, 'label' | 'output_dest' | 'output_dir' | 'copy_av1' | 'preset_name'>>;
 
 type WatchFolderResult = {
   folder: WatchFolder;
@@ -334,6 +335,8 @@ function App() {
   }, []);
 
   const availableEncoders = useMemo(() => hardware.encoders.filter((encoder) => encoder.available), [hardware.encoders]);
+  const availableEncoderNames = useMemo(() => new Set(availableEncoders.map((encoder) => encoder.name)), [availableEncoders]);
+  const availablePresets = useMemo(() => presets.filter((preset) => availableEncoderNames.has(preset.encoder)), [availableEncoderNames, presets]);
   const browserFolders = useMemo(() => fileBrowser.entries.filter((entry) => entry.is_dir), [fileBrowser.entries]);
   const onlineTaskIds = useMemo(() => new Set(onlineJobs.map((job) => job.task_id).filter(Boolean) as string[]), [onlineJobs]);
   const onlineTasks = useMemo(() => tasks.filter((task) => onlineTaskIds.has(task.task_id)), [onlineTaskIds, tasks]);
@@ -550,6 +553,13 @@ function App() {
     document.documentElement.dataset.theme = theme;
   }, [theme]);
 
+  useEffect(() => {
+    if (!selectedPreset) return;
+    if (!availablePresets.some((preset) => preset.name === selectedPreset)) {
+      setSelectedPreset('');
+    }
+  }, [availablePresets, selectedPreset, setSelectedPreset]);
+
   async function browseTo(path: string) {
     setFileBrowser(await apiGet<FileBrowser>(`/api/files?path=${encodeURIComponent(path)}`));
     setNewFolderOpen(false);
@@ -587,6 +597,14 @@ function App() {
     setWatchFolders((items) =>
       items.map((wf) => (wf.folder.path === folderPath ? { ...wf, folder: { ...wf.folder, ...patch } } : wf)),
     );
+    if (folderPath === managedFolderPath && patch.copy_av1 !== undefined) {
+      setManagedData((old) => old ? {
+        ...old,
+        folder: { ...old.folder, copy_av1: patch.copy_av1 ?? old.folder.copy_av1 },
+        items: old.items.map((item) => reclassifyManagedAV1Item(item, patch.copy_av1 ?? old.folder.copy_av1)),
+      } : old);
+      setManagedOverrides({});
+    }
   }
 
   async function chooseOutputFolder(selectedPath: string) {
@@ -651,8 +669,16 @@ function App() {
       showToast('请先为目录监控设置输出方式', 'info');
       return;
     }
-    await apiSend('/api/transcode', { ...form, suffix_enabled: form.suffix_enabled !== false, extra_args: form.extra_args || [], files: runnableFiles, file_outputs: buildFileOutputs(runnableFiles) });
-    showToast(`已提交 ${runnableFiles.length} 个文件转码`, 'info');
+    const groups = groupFilesByTranscodeSettings(runnableFiles, watchFolders, availablePresets, form);
+    for (const group of groups) {
+      await apiSend('/api/transcode', {
+        ...group.request,
+        suffix_enabled: form.suffix_enabled !== false,
+        files: group.files,
+        file_outputs: buildFileOutputs(group.files),
+      });
+    }
+    showToast(groups.length > 1 ? `已按目录预设提交 ${groups.length} 个转码任务` : `已提交 ${runnableFiles.length} 个文件转码`, 'info');
     await refreshTasks();
   }
 
@@ -681,8 +707,8 @@ function App() {
 
   async function uploadOnlineFiles(files: File[]) {
     if (!files.length) return;
-    const selectedOnlinePreset = presets.find((preset) => preset.name === selectedPreset);
-    if (!selectedOnlinePreset || !availableEncoders.some((encoder) => encoder.name === selectedOnlinePreset.encoder)) {
+    const selectedOnlinePreset = availablePresets.find((preset) => preset.name === selectedPreset);
+    if (!selectedOnlinePreset) {
       showToast('请先选择在线转码预设', 'error');
       return;
     }
@@ -759,7 +785,7 @@ function App() {
   }
 
   async function savePreset(preset: Preset | null = null) {
-    const payload = preset ?? { ...newPreset, extra_args: splitArgs(newPreset.extra_args), output_ext: newPreset.output_ext || 'auto', builtin: false };
+    const payload = preset ? normalizedPreset(preset) : normalizedPreset({ ...newPreset, extra_args: splitArgs(newPreset.extra_args), output_ext: newPreset.output_ext || 'auto', builtin: false });
     await apiSend('/api/presets', payload);
     setNewPreset({ name: '', encoder: form.encoder, crf: 28, preset: 8, extra_args: '', output_ext: 'auto' });
     setEditingPreset(null);
@@ -822,19 +848,23 @@ function App() {
               <h1>FFT</h1>
               <p>FFmpeg AV1 Transcoder</p>
             </div>
+          </div>
+
+          <nav className="sidebar-nav" aria-label="主导航">
+            <div className="sidebar-nav-label">导航</div>
             <button
-              className="sidebar-collapse-btn"
+              className="sidebar-nav-item sidebar-collapse-btn"
               type="button"
               aria-label={sidebarCollapsed ? '展开导航栏' : '折叠导航栏'}
               title={sidebarCollapsed ? '展开导航栏' : '折叠导航栏'}
               onClick={() => setSidebarCollapsed((value) => !value)}
             >
-              {sidebarCollapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
+              {sidebarCollapsed ? <ChevronRight size={18} /> : <ChevronLeft size={18} />}
+              <span>
+                <strong>{sidebarCollapsed ? '展开导航栏' : '折叠导航栏'}</strong>
+                <small>切换侧边栏宽度</small>
+              </span>
             </button>
-          </div>
-
-          <nav className="sidebar-nav" aria-label="主导航">
-            <div className="sidebar-nav-label">导航</div>
             {navItems.map((item) => {
               const Icon = item.icon;
               return (
@@ -851,7 +881,7 @@ function App() {
 
           <div className="sidebar-footer">
             <div className="sidebar-footer-meta">
-              <span className="sidebar-version">FFT v2.0.2</span>
+              <span className="sidebar-version">FFT v2.1</span>
               <button className="theme-toggle" aria-label={isDark ? '切换到浅色模式' : '切换到深色模式'} title={isDark ? '浅色模式' : '深色模式'} onClick={() => setTheme(isDark ? 'light' : 'dark')}>
                 {isDark ? <Sun size={14} /> : <Moon size={14} />}
               </button>
@@ -867,13 +897,15 @@ function App() {
               <ConsolePage
                 watchFolders={watchFolders}
                 tasks={tasks}
+                presets={availablePresets}
+                globalForm={form}
                 sysInfo={sysInfo}
                 systemUsage={systemUsage}
                 onBrowseWatchFolder={() => { setBrowserMode('watch'); void browseTo('/'); }}
                 onRefreshWatchFolders={() => void loadWatchFolders(false)}
                 wfLoading={wfLoading}
                 onRemoveWatchFolder={(path) => void removeWatchFolder(path)}
-                onUpdateFolder={(path, patch) => void updateFolder(path, patch)}
+                onUpdateFolder={(path, patch) => updateFolder(path, patch)}
                 onReplaceWatchFolder={(path) => { replacingFolderRef.current = path; setBrowserMode('replace'); void browseTo('/'); }}
                 onBrowseOutputFolder={(path) => { outputFolderRef.current = path; setBrowserMode('output'); void browseTo('/'); }}
                 onStartFolderTranscode={(files) => void startTranscodeFor(files)}
@@ -887,13 +919,12 @@ function App() {
               <OnlinePage
                 jobs={onlineJobs}
                 tasks={onlineTasks}
-                presets={presets}
-                availableEncoders={availableEncoders}
+                presets={availablePresets}
                 selectedPreset={selectedPreset}
                 onPresetChange={(name) => {
                   setSelectedPreset(name);
-                  const preset = presets.find((item) => item.name === name);
-                  if (preset) setForm((old) => ({ ...old, encoder: preset.encoder, crf: preset.crf, preset: preset.preset, output_ext: preset.output_ext || old.output_ext, extra_args: preset.extra_args || [] }));
+                  const preset = availablePresets.find((item) => item.name === name);
+                  if (preset) setForm((old) => ({ ...old, ...presetToFormPatch(preset, old.output_ext) }));
                   else setForm((old) => ({ ...old, extra_args: [] }));
                 }}
                 onUpload={(files) => void uploadOnlineFiles(files)}
@@ -910,10 +941,11 @@ function App() {
               <FileManagerPage
                 watchFolders={watchFolders}
                 selectedPath={managedFolderPath}
+                globalForm={form}
                 data={managedData}
                 loading={managedLoading}
                 tasks={tasks}
-                presets={presets}
+                presets={availablePresets}
                 actions={managedActions}
                 items={managedItems}
                 filteredItems={managedFilteredItems}
@@ -921,9 +953,9 @@ function App() {
                   setManagedFolderPath(path);
                   void loadManagedFolder(path);
                 }}
-                onUpdateFolder={(path, patch) => void updateFolder(path, patch)}
+                onUpdateFolder={(path, patch) => updateFolder(path, patch)}
                 onBrowseOutputFolder={(path) => { outputFolderRef.current = path; setBrowserMode('output'); void browseTo('/'); }}
-                onRefresh={() => void loadManagedFolder(managedFolderPath)}
+                onRefresh={() => loadManagedFolder(managedFolderPath)}
                 onStartFolderTranscode={(files) => void startTranscodeFor(files)}
                 onToggleAction={(status) => setManagedActions((old) => old.includes(status) ? old.filter((item) => item !== status) : [...old, status])}
                 onToggleItemStatus={(item) => setManagedOverrides((old) => ({ ...old, [item.id]: item.status === 'keep' ? 'add' : 'keep' }))}
@@ -944,7 +976,7 @@ function App() {
               <>
                 <section className="panel workspace-panel transcode-settings-panel">
                   <div className="transcode-settings-body">
-                    <div className="section-title"><Gauge size={18} />转码设置</div>
+                    <div className="section-title"><Gauge size={18} />全局转码设置</div>
                     <div className="grid gap-3 sm:grid-cols-2">
                       <label className="field">
                         <span>编码器</span>
@@ -961,12 +993,12 @@ function App() {
                         <select value={selectedPreset} onChange={(event) => {
                           const name = event.target.value;
                           setSelectedPreset(name);
-                          const preset = presets.find((item) => item.name === name);
-                          if (preset) setForm((old) => ({ ...old, encoder: preset.encoder, crf: preset.crf, preset: preset.preset, output_ext: preset.output_ext || old.output_ext, extra_args: preset.extra_args || [] }));
+                          const preset = availablePresets.find((item) => item.name === name);
+                          if (preset) setForm((old) => ({ ...old, ...presetToFormPatch(preset, old.output_ext) }));
                           else setForm((old) => ({ ...old, extra_args: [] }));
                         }}>
                           <option value="">自定义</option>
-                          {presets.map((preset) => <option key={preset.name} value={preset.name}>{preset.name}</option>)}
+                          {availablePresets.map((preset) => <option key={preset.name} value={preset.name}>{preset.name}</option>)}
                         </select>
                       </label>
                     </div>
@@ -980,18 +1012,21 @@ function App() {
                       onChange={(value) => setForm((old) => ({ ...old, preset: value }))}
                     />
                     <div className="grid gap-3 sm:grid-cols-2">
-                      <label className="field">
-                        <span className="field-label-row">
-                          输出后缀
-                          <input
-                            className="mini-toggle-input"
-                            type="checkbox"
-                            checked={form.suffix_enabled !== false}
-                            aria-label="开启输出后缀"
-                            onChange={(event) => setForm((old) => ({ ...old, suffix_enabled: event.target.checked }))}
-                          />
-                        </span>
-                        <input
+	                      <label className="field">
+	                        <span className="field-label-row">
+	                          <span>输出后缀</span>
+	                          <span className="mini-toggle" title={form.suffix_enabled !== false ? '关闭输出后缀' : '开启输出后缀'}>
+	                            <input
+	                              className="mini-toggle-input"
+	                              type="checkbox"
+	                              checked={form.suffix_enabled !== false}
+	                              aria-label="开启输出后缀"
+	                              onChange={(event) => setForm((old) => ({ ...old, suffix_enabled: event.target.checked }))}
+	                            />
+	                            <span className="mini-toggle-track" aria-hidden="true" />
+	                          </span>
+	                        </span>
+	                        <input
                           value={form.suffix}
                           disabled={form.suffix_enabled === false}
                           onChange={(event) => setForm((old) => ({ ...old, suffix: event.target.value }))}
@@ -1082,7 +1117,7 @@ function App() {
 
           {tab === 'presets' && (
             <PresetsWorkspace
-              presets={presets}
+              presets={availablePresets}
               availableEncoders={availableEncoders}
               editingPreset={editingPreset}
               editPreset={editPreset}
@@ -1208,6 +1243,8 @@ type PresetVendorFilter = 'cpu' | 'nvidia' | 'intel' | 'amd';
 function ConsolePage({
   watchFolders,
   tasks,
+  presets,
+  globalForm,
   sysInfo,
   systemUsage,
   onBrowseWatchFolder,
@@ -1224,13 +1261,15 @@ function ConsolePage({
 }: {
   watchFolders: WatchFolderResult[];
   tasks: TaskInfo[];
+  presets: Preset[];
+  globalForm: TranscodeForm;
   sysInfo: SystemInfo | null;
   systemUsage: SystemUsage | null;
   onBrowseWatchFolder: () => void;
   onRefreshWatchFolders: () => void;
   wfLoading: boolean;
   onRemoveWatchFolder: (path: string) => void;
-  onUpdateFolder: (path: string, patch: WatchFolderPatch) => void;
+  onUpdateFolder: (path: string, patch: WatchFolderPatch) => Promise<void>;
   onReplaceWatchFolder: (path: string) => void;
   onBrowseOutputFolder: (path: string) => void;
   onStartFolderTranscode: (files: string[]) => void;
@@ -1337,6 +1376,8 @@ function ConsolePage({
       <WatchFoldersPanel
         watchFolders={watchFolders}
         tasks={tasks}
+        presets={presets}
+        globalForm={globalForm}
         onBrowseWatchFolder={onBrowseWatchFolder}
         onRefreshWatchFolders={onRefreshWatchFolders}
         wfLoading={wfLoading}
@@ -1364,6 +1405,8 @@ function ConsolePage({
 function WatchFoldersPanel({
   watchFolders,
   tasks,
+  presets,
+  globalForm,
   onBrowseWatchFolder,
   onRefreshWatchFolders,
   wfLoading,
@@ -1379,11 +1422,13 @@ function WatchFoldersPanel({
 }: {
   watchFolders: WatchFolderResult[];
   tasks: TaskInfo[];
+  presets: Preset[];
+  globalForm: TranscodeForm;
   onBrowseWatchFolder: () => void;
   onRefreshWatchFolders: () => void;
   wfLoading: boolean;
   onRemoveWatchFolder: (path: string) => void;
-  onUpdateFolder: (path: string, patch: WatchFolderPatch) => void;
+  onUpdateFolder: (path: string, patch: WatchFolderPatch) => Promise<void>;
   onReplaceWatchFolder: (path: string) => void;
   onBrowseOutputFolder: (path: string) => void;
   onStartFolderTranscode: (files: string[]) => void;
@@ -1410,6 +1455,7 @@ function WatchFoldersPanel({
           const needsCustomOutput = outputDest === 'custom' && !wf.folder.output_dir;
           const outputUnset = !outputDest;
           const taskName = wf.folder.label || folderName(wf.folder.path);
+          const presetLabel = folderPresetLabel(wf.folder, presets, globalForm);
           const folderFiles = wf.files.map((file) => file.path);
           const activeTask = tasks.find((task) => isActiveTranscodeTask(task) && taskTouchesFolder(task, wf.folder.path));
           const activeProgress = activeTask ? taskProgressPercent(activeTask) : 0;
@@ -1430,6 +1476,7 @@ function WatchFoldersPanel({
                       placeholder={folderName(wf.folder.path)}
                       aria-label="目录监控备注名"
                     />
+                    <span className="watch-folder-preset" title={presetLabel}>{presetLabel}</span>
                     <div className="watch-folder-meta">
                       <span className={`watch-folder-state ${activeTask ? 'running' : 'ok'}`}>
                         {activeTask ? `转码中 ${activeProgress}%` : '监控中'}
@@ -1443,7 +1490,7 @@ function WatchFoldersPanel({
                   {activeTask ? (
                     <button className="icon-btn danger" title="取消转码" onClick={() => onCancelTask(activeTask.task_id)}><Square size={16} /></button>
                   ) : (
-                    <button className="icon-btn" title="开始转码" disabled={!folderFiles.length || outputUnset || needsCustomOutput} onClick={() => onStartFolderTranscode(folderFiles)}><Play size={16} /></button>
+                  <button className="icon-btn" title="开始转码" disabled={!folderFiles.length || outputUnset || needsCustomOutput} onClick={() => onStartFolderTranscode(folderFiles)}><Play size={16} /></button>
                   )}
                   <button className="icon-btn" title="更多设置" onClick={() => setSettingsFolderPath(wf.folder.path)}><MoreHorizontal size={18} /></button>
                   <button className="icon-btn danger" title="删除" onClick={() => onRemoveWatchFolder(wf.folder.path)}><Trash2 size={16} /></button>
@@ -1494,6 +1541,8 @@ function WatchFoldersPanel({
           onBrowseOutputFolder={onBrowseOutputFolder}
           onStartFolderTranscode={onStartFolderTranscode}
           onCancelTask={onCancelTask}
+          presets={presets}
+          globalForm={globalForm}
           activeTask={tasks.find((task) => isActiveTranscodeTask(task) && taskTouchesFolder(task, settingsFolder.folder.path)) ?? null}
           autoTranscode={autoTranscode}
           onAutoTranscodeChange={onAutoTranscodeChange}
@@ -1510,23 +1559,29 @@ function WatchFolderSettingsModal({
   onBrowseOutputFolder,
   onStartFolderTranscode,
   onCancelTask,
+  presets,
+  globalForm,
   activeTask,
   autoTranscode,
   onAutoTranscodeChange,
 }: {
   wf: WatchFolderResult;
   onClose: () => void;
-  onUpdateFolder: (path: string, patch: WatchFolderPatch) => void;
+  onUpdateFolder: (path: string, patch: WatchFolderPatch) => Promise<void>;
   onBrowseOutputFolder: (path: string) => void;
   onStartFolderTranscode: (files: string[]) => void;
   onCancelTask: (taskID: string) => void;
+  presets: Preset[];
+  globalForm: TranscodeForm;
   activeTask: TaskInfo | null;
   autoTranscode: boolean;
   onAutoTranscodeChange: React.Dispatch<React.SetStateAction<boolean>>;
 }) {
-  const [activeTab, setActiveTab] = useState<'output' | 'action' | 'advanced'>('output');
+  const [activeTab, setActiveTab] = useState<'output' | 'preset' | 'action' | 'advanced'>('output');
   const outputPath = outputFolderPath(wf.folder);
   const outputDest = normalizedOutputDest(wf.folder);
+  const selectedPreset = presets.find((preset) => preset.name === wf.folder.preset_name) ?? null;
+  const presetLabel = folderPresetLabel(wf.folder, presets, globalForm);
   const folderFiles = wf.files.map((file) => file.path);
   const outputOptions = [
     { value: 'beside', title: '源文件旁', detail: '转码后文件和源文件放在同一目录' },
@@ -1546,6 +1601,7 @@ function WatchFolderSettingsModal({
 
         <div className="watch-settings-tabs" role="tablist">
           <button className={activeTab === 'output' ? 'active' : ''} onClick={() => setActiveTab('output')}>输出方式</button>
+          <button className={activeTab === 'preset' ? 'active' : ''} onClick={() => setActiveTab('preset')}>编码预设</button>
           <button className={activeTab === 'action' ? 'active' : ''} onClick={() => setActiveTab('action')}>手动处理</button>
           <button className={activeTab === 'advanced' ? 'active' : ''} onClick={() => setActiveTab('advanced')}>高级设置</button>
         </div>
@@ -1576,6 +1632,43 @@ function WatchFolderSettingsModal({
               {outputDest === 'custom' && (
                 <button className="btn" onClick={() => onBrowseOutputFolder(wf.folder.path)}><FolderOpen size={16} />选择目标目录</button>
               )}
+            </div>
+          )}
+
+          {activeTab === 'preset' && (
+            <div className="watch-settings-section">
+              <div className="watch-settings-summary">
+                <span>当前预设</span>
+                <strong>{selectedPreset?.name || '使用全局设置'}</strong>
+                <small title={presetLabel}>{presetLabel}</small>
+              </div>
+              <div className="watch-preset-options">
+                <button
+                  className={`watch-preset-option ${!wf.folder.preset_name ? 'active' : ''}`}
+                  type="button"
+                  onClick={() => onUpdateFolder(wf.folder.path, { preset_name: '' })}
+                >
+                  <span className="radio-dot" aria-hidden="true" />
+                  <span>
+                    <strong>使用全局转码设置</strong>
+                    <small>{folderPresetLabel({ ...wf.folder, preset_name: '' }, presets, globalForm)}</small>
+                  </span>
+                </button>
+                {presets.map((preset) => (
+                  <button
+                    key={preset.name}
+                    className={`watch-preset-option ${wf.folder.preset_name === preset.name ? 'active' : ''}`}
+                    type="button"
+                    onClick={() => onUpdateFolder(wf.folder.path, { preset_name: preset.name })}
+                  >
+                    <span className="radio-dot" aria-hidden="true" />
+                    <span>
+                      <strong>{preset.name}</strong>
+                      <small>{presetSummaryLine(preset)}</small>
+                    </span>
+                  </button>
+                ))}
+              </div>
             </div>
           )}
 
@@ -1753,6 +1846,7 @@ function StatusChip({ tone, icon: Icon, label, value }: { tone: 'running' | 'upc
 function FileManagerPage({
   watchFolders,
   selectedPath,
+  globalForm,
   data,
   loading,
   tasks,
@@ -1775,6 +1869,7 @@ function FileManagerPage({
 }: {
   watchFolders: WatchFolderResult[];
   selectedPath: string;
+  globalForm: TranscodeForm;
   data: ManagedFolderResponse | null;
   loading: boolean;
   tasks: TaskInfo[];
@@ -1783,9 +1878,9 @@ function FileManagerPage({
   items: ManagedFileItem[];
   filteredItems: ManagedFileItem[];
   onSelectFolder: (path: string) => void;
-  onUpdateFolder: (path: string, patch: WatchFolderPatch) => void;
+  onUpdateFolder: (path: string, patch: WatchFolderPatch) => Promise<void>;
   onBrowseOutputFolder: (path: string) => void;
-  onRefresh: () => void;
+  onRefresh: () => Promise<void>;
   onStartFolderTranscode: (files: string[]) => void;
   onToggleAction: (status: ManagedStatus) => void;
   onToggleItemStatus: (item: ManagedFileItem) => void;
@@ -1796,6 +1891,8 @@ function FileManagerPage({
   onAutoTranscodeChange: React.Dispatch<React.SetStateAction<boolean>>;
 }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [presetMenuOpen, setPresetMenuOpen] = useState(false);
+  const presetMenuRef = useRef<HTMLDivElement>(null);
   const [justCompleted, setJustCompleted] = useState<Set<string>>(() => new Set());
   const previousRunningRef = useRef<Set<string>>(new Set());
   const selectedWatchFolder = watchFolders.find((wf) => wf.folder.path === selectedPath) ?? null;
@@ -1806,8 +1903,10 @@ function FileManagerPage({
   }, [items]);
   const progress = Math.round(data?.summary.progress || 0);
   const currentPresetLabel = useMemo(
-    () => managedFolderPresetLabel(tasks, presets, selectedPath, data?.summary.active_task_id),
-    [data?.summary.active_task_id, presets, selectedPath, tasks],
+    () => selectedWatchFolder
+      ? folderPresetLabel(selectedWatchFolder.folder, presets, globalForm)
+      : managedFolderPresetLabel(tasks, presets, selectedPath, undefined, data?.summary.active_task_id),
+    [data?.summary.active_task_id, globalForm, presets, selectedPath, selectedWatchFolder, tasks],
   );
   const targetProgress = useMemo(() => {
     const map = new Map<string, number>();
@@ -1819,6 +1918,14 @@ function FileManagerPage({
     }
     return map;
   }, [tasks]);
+  const refreshAfterFolderUpdate = useCallback(
+    async (path: string, patch: WatchFolderPatch) => {
+      await onUpdateFolder(path, patch);
+      if (path === selectedPath) await onRefresh();
+    },
+    [onRefresh, onUpdateFolder, selectedPath],
+  );
+  useClickOutside(presetMenuRef, presetMenuOpen, () => setPresetMenuOpen(false));
 
   useEffect(() => {
     const running = new Set(items.filter((item) => item.status === 'running').map((item) => item.id));
@@ -1866,7 +1973,48 @@ function FileManagerPage({
           <div className="file-manager-title">
             <div className="file-manager-title-row">
               <h2>{data?.summary.name || '文件管理'}</h2>
-              {currentPresetLabel && <span className="file-manager-preset" title={currentPresetLabel}>{currentPresetLabel}</span>}
+              {currentPresetLabel && (
+                <div className="file-manager-preset-picker" ref={presetMenuRef}>
+                  <button
+                    className="file-manager-preset"
+                    type="button"
+                    title={currentPresetLabel}
+                    disabled={!selectedWatchFolder}
+                    onClick={() => setPresetMenuOpen((open) => !open)}
+                  >
+                    {currentPresetLabel}<ChevronDown size={12} />
+                  </button>
+                  {presetMenuOpen && selectedWatchFolder && (
+                    <div className="file-manager-preset-menu">
+                      <button
+                        className={!selectedWatchFolder.folder.preset_name ? 'active' : ''}
+                        type="button"
+                        onClick={() => {
+                          void refreshAfterFolderUpdate(selectedWatchFolder.folder.path, { preset_name: '' });
+                          setPresetMenuOpen(false);
+                        }}
+                      >
+                        <strong>使用全局设置</strong>
+                        <span>{folderPresetLabel({ ...selectedWatchFolder.folder, preset_name: '' }, presets, globalForm)}</span>
+                      </button>
+                      {presets.map((preset) => (
+                        <button
+                          key={preset.name}
+                          className={selectedWatchFolder.folder.preset_name === preset.name ? 'active' : ''}
+                          type="button"
+                          onClick={() => {
+                            void refreshAfterFolderUpdate(selectedWatchFolder.folder.path, { preset_name: preset.name });
+                            setPresetMenuOpen(false);
+                          }}
+                        >
+                          <strong>{preset.name}</strong>
+                          <span>{presetSummaryLine(preset)}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
             <p><span>来源</span>{data?.summary.source || '-'}<span>目的地</span>{data?.summary.target || '-'}</p>
             <div className="file-manager-stats">
@@ -1880,9 +2028,11 @@ function FileManagerPage({
           <div className="file-manager-progress">
             <strong>{progress}%</strong>
             <span>当前任务进度</span>
-            <button className="icon-btn" title="更多设置" disabled={!selectedWatchFolder} onClick={() => setSettingsOpen(true)}><MoreHorizontal size={18} /></button>
-            <button className="btn" disabled={!data?.summary.active_task_id} onClick={onCancel}><Square size={15} />取消</button>
-            <button className="icon-btn file-manager-refresh" title="刷新" onClick={onRefresh}><RefreshCw className={loading ? 'animate-spin' : ''} size={16} /></button>
+            <div className="file-manager-progress-actions">
+              <button className="icon-btn" title="更多设置" disabled={!selectedWatchFolder} onClick={() => setSettingsOpen(true)}><MoreHorizontal size={18} /></button>
+              <button className="icon-btn file-manager-refresh" title="刷新" onClick={onRefresh}><RefreshCw className={loading ? 'animate-spin' : ''} size={16} /></button>
+              <button className="btn" disabled={!data?.summary.active_task_id} onClick={onCancel}><Square size={15} />取消</button>
+            </div>
           </div>
         </div>
 
@@ -1910,10 +2060,12 @@ function FileManagerPage({
         <WatchFolderSettingsModal
           wf={selectedWatchFolder}
           onClose={() => setSettingsOpen(false)}
-          onUpdateFolder={onUpdateFolder}
+          onUpdateFolder={refreshAfterFolderUpdate}
           onBrowseOutputFolder={onBrowseOutputFolder}
           onStartFolderTranscode={onStartFolderTranscode}
           onCancelTask={() => onCancel()}
+          presets={presets}
+          globalForm={globalForm}
           activeTask={tasks.find((task) => isActiveTranscodeTask(task) && taskTouchesFolder(task, selectedWatchFolder.folder.path)) ?? null}
           autoTranscode={autoTranscode}
           onAutoTranscodeChange={onAutoTranscodeChange}
@@ -2021,7 +2173,6 @@ function OnlinePage({
   jobs,
   tasks,
   presets,
-  availableEncoders,
   selectedPreset,
   onPresetChange,
   onUpload,
@@ -2031,7 +2182,6 @@ function OnlinePage({
   jobs: OnlineJob[];
   tasks: TaskInfo[];
   presets: Preset[];
-  availableEncoders: EncoderInfo[];
   selectedPreset: string;
   onPresetChange: (name: string) => void;
   onUpload: (files: File[]) => void;
@@ -2040,15 +2190,11 @@ function OnlinePage({
 }) {
   const [dragging, setDragging] = useState(false);
   const [presetOpen, setPresetOpen] = useState(false);
+  const presetRef = useRef<HTMLDivElement>(null);
   const taskByID = useMemo(() => new Map(tasks.map((task) => [task.task_id, task])), [tasks]);
-  const availableEncoderNames = useMemo(() => new Set(availableEncoders.map((encoder) => encoder.name)), [availableEncoders]);
-  const availablePresets = useMemo(
-    () => presets.filter((preset) => availableEncoderNames.has(preset.encoder)),
-    [availableEncoderNames, presets],
-  );
   const currentPreset = useMemo(
-    () => availablePresets.find((preset) => preset.name === selectedPreset) ?? null,
-    [availablePresets, selectedPreset],
+    () => presets.find((preset) => preset.name === selectedPreset) ?? null,
+    [presets, selectedPreset],
   );
   const fileInputRef = useRef<HTMLInputElement>(null);
   const acceptFiles = (fileList: FileList | null) => {
@@ -2059,6 +2205,7 @@ function OnlinePage({
     onPresetChange(name);
     setPresetOpen(false);
   };
+  useClickOutside(presetRef, presetOpen, () => setPresetOpen(false));
 
   return (
     <section className="online-page">
@@ -2081,7 +2228,7 @@ function OnlinePage({
           <p>文件会先进入服务器缓存目录，转码完成后可直接在浏览器下载。</p>
         </div>
         <button className="btn primary" onClick={() => fileInputRef.current?.click()}><FileUpIcon />选择文件</button>
-        <div className="online-preset-picker">
+        <div className="online-preset-picker" ref={presetRef}>
           <button
             className={`online-preset-trigger ${presetOpen ? 'active' : ''}`}
             type="button"
@@ -2092,7 +2239,7 @@ function OnlinePage({
           </button>
           {presetOpen && (
             <div className="online-preset-menu">
-              {availablePresets.map((preset) => (
+              {presets.map((preset) => (
                 <button
                   key={preset.name}
                   className={preset.name === selectedPreset ? 'active' : ''}
@@ -2103,7 +2250,7 @@ function OnlinePage({
                   <span>{presetSummaryLine(preset)}</span>
                 </button>
               ))}
-              {!availablePresets.length && <div className="online-preset-empty">暂无本机可用预设</div>}
+              {!presets.length && <div className="online-preset-empty">暂无本机可用预设</div>}
             </div>
           )}
           <PresetSummaryLine preset={currentPreset} />
@@ -2703,6 +2850,19 @@ function useLocalStorage<T>(key: string, fallback: T): [T, React.Dispatch<React.
   return [value, setValue];
 }
 
+function useClickOutside<T extends HTMLElement>(ref: React.RefObject<T | null>, active: boolean, onOutside: () => void) {
+  useEffect(() => {
+    if (!active) return undefined;
+    const handlePointerDown = (event: PointerEvent) => {
+      const node = ref.current;
+      if (!node || node.contains(event.target as Node)) return;
+      onOutside();
+    };
+    document.addEventListener('pointerdown', handlePointerDown);
+    return () => document.removeEventListener('pointerdown', handlePointerDown);
+  }, [active, onOutside, ref]);
+}
+
 async function apiGet<T>(url: string): Promise<T> {
   const response = await fetch(url);
   if (!response.ok) throw new Error(await responseText(response));
@@ -2877,7 +3037,9 @@ function taskTouchesFolder(task: TaskInfo, folder: string) {
   return Boolean(task.request?.files?.some((file) => pathBelongsToFolder(file, folder)));
 }
 
-function managedFolderPresetLabel(tasks: TaskInfo[], presets: Preset[], folder: string, activeTaskID?: string) {
+function managedFolderPresetLabel(tasks: TaskInfo[], presets: Preset[], folder: string, folderPresetName?: string, activeTaskID?: string) {
+  const folderPreset = presets.find((item) => item.name === folderPresetName);
+  if (folderPreset) return presetSummaryLabel(folderPreset);
   if (!folder) return '';
   const related = tasks.find((task) => activeTaskID && task.task_id === activeTaskID)
     || tasks.find((task) => taskTouchesFolder(task, folder) && (task.status === 'running' || task.status === 'pending'))
@@ -2897,6 +3059,49 @@ function managedFolderPresetLabel(tasks: TaskInfo[], presets: Preset[], folder: 
   });
   const name = matchedPreset?.name || '自定义';
   return `${name} · ${request.encoder} · CRF ${crf} · Preset ${presetDisplayValue(request.encoder, preset)}`;
+}
+
+function folderPresetLabel(folder: WatchFolder, presets: Preset[], globalForm: TranscodeForm) {
+  const preset = presets.find((item) => item.name === folder.preset_name);
+  if (preset) return presetSummaryLabel(preset);
+  return `全局设置 · ${globalForm.encoder} · CRF ${globalForm.crf} · Preset ${presetDisplayValue(globalForm.encoder, globalForm.preset)}`;
+}
+
+function presetSummaryLabel(preset: Preset) {
+  return `${preset.name} · ${preset.encoder} · CRF ${preset.crf} · Preset ${presetDisplayValue(preset.encoder, preset.preset)}`;
+}
+
+function transcodeRequestForFolder(folder: WatchFolder | undefined, presets: Preset[], globalForm: TranscodeForm): TaskRequest {
+  const preset = folder?.preset_name ? presets.find((item) => item.name === folder.preset_name) : null;
+  if (!preset) return normalizedTranscodeForm(globalForm);
+  return {
+    encoder: preset.encoder,
+    crf: preset.crf,
+    preset: normalizedPresetValue(preset.encoder, preset.preset),
+    output_ext: preset.output_ext || globalForm.output_ext || 'auto',
+    suffix: globalForm.suffix,
+    suffix_enabled: globalForm.suffix_enabled,
+    extra_args: preset.extra_args || [],
+  };
+}
+
+function groupFilesByTranscodeSettings(files: string[], watchFolders: WatchFolderResult[], presets: Preset[], globalForm: TranscodeForm) {
+  const groups = new Map<string, { request: TaskRequest; files: string[] }>();
+  for (const file of files) {
+    const wf = watchFolders.find((item) => fileBelongsToWatchFolder(file, item));
+    const request = transcodeRequestForFolder(wf?.folder, presets, globalForm);
+    const key = JSON.stringify({
+      encoder: request.encoder,
+      crf: request.crf,
+      preset: request.preset,
+      output_ext: request.output_ext,
+      extra_args: request.extra_args || [],
+    });
+    const group = groups.get(key) || { request, files: [] };
+    group.files.push(file);
+    groups.set(key, group);
+  }
+  return [...groups.values()];
 }
 
 function managedStatusLabel(status: ManagedStatus) {
@@ -2924,6 +3129,24 @@ function isAV1CodecName(codec?: string) {
   return value === 'av1' || value === 'libsvtav1' || value === 'libaom-av1' || value === 'librav1e';
 }
 
+function reclassifyManagedAV1Item(item: ManagedFileItem, copyAV1: boolean): ManagedFileItem {
+  if (item.status === 'running' || !isAV1CodecName(item.source.meta?.video_codec)) return item;
+  let next: ManagedFileItem;
+  if (!copyAV1) {
+    next = { ...item, status: 'keep', message: '源文件已是 AV1' };
+  } else if (!item.target.path) {
+    next = { ...item, status: 'keep', message: '源文件已是 AV1，尚未设置复制目标' };
+  } else if (!item.target.exists) {
+    next = { ...item, status: 'add', message: '源文件已是 AV1，将直接复制' };
+  } else {
+    next = { ...item, status: 'keep', message: 'AV1 副本已存在' };
+  }
+  if (item.target.exists && item.target.meta?.probe_failed) {
+    return { ...next, status: 'force', message: '目标文件无法识别，可能已损坏' };
+  }
+  return next;
+}
+
 function formatBitrate(bitsPerSecond: number) {
   if (bitsPerSecond >= 1_000_000) return `${(bitsPerSecond / 1_000_000).toFixed(1)} Mbps`;
   if (bitsPerSecond >= 1_000) return `${Math.round(bitsPerSecond / 1_000)} kbps`;
@@ -2947,7 +3170,37 @@ function presetDisplayValue(encoder: string, preset: number | string) {
 function qsvPresetValue(preset: number | string) {
   const text = String(preset).trim().toLowerCase();
   const index = qsvPresetLabels.indexOf(text);
-  return index >= 0 ? String(index) : String(preset);
+  if (index >= 0) return String(index);
+  const numeric = Number(text);
+  if (Number.isFinite(numeric)) return String(clamp(Math.trunc(numeric), 0, qsvPresetLabels.length - 1));
+  return String(preset);
+}
+
+function normalizedPresetValue(encoder: string, preset: number | string) {
+  if (encoder !== 'av1_qsv') return preset;
+  return qsvPresetValue(preset);
+}
+
+function normalizedPreset<T extends Pick<Preset, 'encoder' | 'preset'>>(preset: T): T {
+  return { ...preset, preset: normalizedPresetValue(preset.encoder, preset.preset) };
+}
+
+function normalizedTranscodeForm(form: TranscodeForm): TranscodeForm {
+  return { ...form, preset: normalizedPresetValue(form.encoder, form.preset) };
+}
+
+function presetToFormPatch(preset: Preset, fallbackOutputExt: string): Partial<TranscodeForm> {
+  return {
+    encoder: preset.encoder,
+    crf: preset.crf,
+    preset: normalizedPresetValue(preset.encoder, preset.preset),
+    output_ext: preset.output_ext || fallbackOutputExt,
+    extra_args: preset.extra_args || [],
+  };
+}
+
+function clamp(value: number, minValue: number, maxValue: number) {
+  return Math.min(Math.max(value, minValue), maxValue);
 }
 
 function presetSummaryLine(preset: Preset) {

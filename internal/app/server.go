@@ -259,6 +259,7 @@ func (s *Server) addWatchFolder(c *gin.Context) {
 		"output_dest": record.OutputDest,
 		"output_dir":  record.OutputDir,
 		"copy_av1":    record.CopyAV1,
+		"preset_name": record.PresetName,
 	})
 }
 
@@ -268,6 +269,7 @@ type updateWatchFolderReq struct {
 	Path       *string `json:"path"`
 	Label      *string `json:"label"`
 	CopyAV1    *bool   `json:"copy_av1"`
+	PresetName *string `json:"preset_name"`
 }
 
 func (s *Server) updateWatchFolder(c *gin.Context) {
@@ -316,10 +318,10 @@ func (s *Server) updateWatchFolder(c *gin.Context) {
 				outputDest, outputDir = normalizeWatchFolderOutput(path, outputDest, outputDir)
 				req.OutputDest = &outputDest
 				req.OutputDir = &outputDir
-				record, err = s.db.UpdateWatchFolder(path, req.OutputDest, req.OutputDir, req.Label, req.CopyAV1)
+				record, err = s.db.UpdateWatchFolder(path, req.OutputDest, req.OutputDir, req.Label, req.PresetName, req.CopyAV1)
 			}
 		} else {
-			record, err = s.db.UpdateWatchFolder(path, req.OutputDest, req.OutputDir, req.Label, req.CopyAV1)
+			record, err = s.db.UpdateWatchFolder(path, req.OutputDest, req.OutputDir, req.Label, req.PresetName, req.CopyAV1)
 		}
 	}
 	if err != nil {
@@ -340,6 +342,7 @@ func (s *Server) updateWatchFolder(c *gin.Context) {
 		"output_dest": record.OutputDest,
 		"output_dir":  record.OutputDir,
 		"copy_av1":    record.CopyAV1,
+		"preset_name": record.PresetName,
 	})
 }
 
@@ -475,6 +478,7 @@ func (s *Server) manageWatchFolder(c *gin.Context) {
 			OutputDest: record.OutputDest,
 			OutputDir:  record.OutputDir,
 			CopyAV1:    record.CopyAV1,
+			PresetName: record.PresetName,
 		},
 		Summary: managedSummary(record, tasks, len(files), sourceSize, targetSize, targetRoot),
 		Items:   items,

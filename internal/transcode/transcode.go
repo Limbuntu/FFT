@@ -746,6 +746,19 @@ func qsvPresetValue(preset models.PresetValue) string {
 	if mapped, ok := qsvPresetMap[value]; ok {
 		return mapped
 	}
+	if number, err := strconv.Atoi(value); err == nil {
+		return strconv.Itoa(clamp(number, 0, 7))
+	}
+	return value
+}
+
+func clamp(value, minValue, maxValue int) int {
+	if value < minValue {
+		return minValue
+	}
+	if value > maxValue {
+		return maxValue
+	}
 	return value
 }
 
