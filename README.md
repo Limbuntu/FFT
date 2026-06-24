@@ -1,6 +1,6 @@
 # FFT — FFmpeg AV1 Transcoder
 
-FFT 是一个面向 AV1 转码工作流的本地 Web 工具。它把目录监控、文件对比、在线调用、预设管理、硬件能力探测、跑分记录和报告导出放在同一个界面里，适合在个人电脑、工作站或家庭局域网内批量管理视频转码任务。
+FFT 是一个面向 AV1 转码工作流的本地 Web 工具，制作这个软件的目的，是在硬盘价格上涨的当下，帮助大家通过更高效的视频压缩节约硬盘空间。它把目录监控、文件对比、在线调用、预设管理、硬件能力探测、跑分记录和报告导出放在同一个界面里，适合在个人电脑、工作站或家庭局域网内批量管理视频转码任务。
 
 后端使用 Go、Gin、SQLite，前端使用 React、TypeScript、Tailwind CSS。核心转码由本机或容器内的 FFmpeg / ffprobe 完成。
 
@@ -18,6 +18,20 @@ FFT 是一个面向 AV1 转码工作流的本地 Web 工具。它把目录监控
 - 本地持久化：SQLite 保存目录监控、预设、任务、跑分和历史状态，后端重启不会清空控制台数据。
 - 局域网访问：默认监听 `0.0.0.0:8166`，同一局域网设备可访问服务地址。
 
+## 界面预览
+
+### 控制台
+
+![控制台](docs/images/dashboard.png)
+
+### 文件管理
+
+![文件管理](docs/images/file-management.png)
+
+### 系统信息
+
+![系统信息](docs/images/system-info.png)
+
 ## 快速开始
 
 ### 下载发布包
@@ -33,97 +47,84 @@ GitHub Release 会提供这些产物：
 
 桌面发布包默认会在启动后打开浏览器。Windows 如果首次运行被系统拦截，请允许本程序访问本机网络；局域网访问还需要防火墙放行 8166 端口。
 
-### 从源码运行
+### Docker
 
-依赖：
+保存为 `docker-compose.yml`：
 
-- Go
-- Node.js 22+
-- FFmpeg 与 ffprobe
+```yaml
+services:
+  fft-go:
+    container_name: fft-go
+    image: ghcr.io/limbuntu/fft-go:latest
+    # NVIDIA GPU:
+    # image: ghcr.io/limbuntu/fft-go:gpu
+    # Intel GPU:
+    # image: ghcr.io/limbuntu/fft-go:intel
+    restart: unless-stopped
+    ports:
+      - "8166:8166"
+    volumes:
+      - /your/media/path:/data
+      - ./fft-go/output:/output
+      - ./fft-go/data:/app/data
+    environment:
+      - FFT_HOST=0.0.0.0
+      - FFT_PORT=8166
+      - FFT_DATA_DIR=/app/data
+      - FFT_CACHE_DIR=/app/data/cache
+      - FFT_DB=/app/data/fft.db
+      - FFT_LOG_FILE=/app/data/logs/fft.log
+    networks:
+      - fft-network
+
+    # Intel GPU:
+    # devices:
+    #   - /dev/dri:/dev/dri
+
+    # NVIDIA GPU:
+    # gpus: all
+
+networks:
+  fft-network:
+    driver: bridge
+```
+
+启动：
+
+```bash
+docker compose up -d
+open http://localhost:8166
+```
+
+如果需要硬件加速镜像，可以把镜像标签换成 `gpu` 或 `intel`，并按注释开启对应设备配置。是否能启用硬件编码取决于宿主机显卡、驱动、容器运行时和 FFmpeg 能力。
+
+NVIDIA 示例：
+
+```yaml
+image: ghcr.io/limbuntu/fft-go:gpu
+```
+
+Intel 示例：
+
+```yaml
+image: ghcr.io/limbuntu/fft-go:intel
+```
+
+### 开发模式
+
+需要本机准备 Go、Node.js、FFmpeg 和 ffprobe。
 
 ```bash
 npm install --prefix frontend
-npm run build
-npm run server
-```
-
-服务默认监听 `http://0.0.0.0:8166`。启动日志会输出本机与局域网访问地址。
-
-开发时可以分别启动后端和 Vite：
-
-```bash
 npm run server
 npm run dev
 ```
 
-Vite 会把 `/api` 和 `/ws` 代理到 `http://127.0.0.1:8166`。
-
-### Docker
-
-Compose 方式：
-
-```bash
-docker compose up -d
-```
-
-需要 NVIDIA GPU 镜像时：
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
-```
-
-需要 Intel QSV 镜像时：
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.intel.yml up -d
-```
-
-普通 Docker 方式：
-
-```bash
-docker run -d --name fft-go \
-  -p 8166:8166 \
-  -v ./videos:/videos \
-  -v ./data:/app/data \
-  ghcr.io/limbuntu/fft-go:latest
-```
-
-NVIDIA GPU：
-
-```bash
-docker run -d --name fft-go \
-  --gpus all \
-  -p 8166:8166 \
-  -v ./videos:/videos \
-  -v ./data:/app/data \
-  ghcr.io/limbuntu/fft-go:gpu
-```
-
-Intel QSV：
-
-```bash
-docker run -d --name fft-go \
-  --device /dev/dri:/dev/dri \
-  -p 8166:8166 \
-  -v ./videos:/videos \
-  -v ./data:/app/data \
-  ghcr.io/limbuntu/fft-go:intel
-```
+后端默认监听 `http://0.0.0.0:8166`，前端开发服务器默认监听 `http://localhost:5173/`。
 
 ## 项目结构
 
-```text
-FFT/
-├── cmd/server/              # Go 服务入口
-├── internal/                # Gin API、业务逻辑、SQLite、WebSocket、FFmpeg 调度
-├── frontend/                # React + TypeScript + Tailwind CSS 前端
-├── .github/workflows/       # GitHub Actions 构建与发布
-├── bench_leaderboard.json   # 内置跑分展示数据
-├── Dockerfile               # CPU 容器镜像
-├── Dockerfile.gpu           # NVIDIA GPU 容器镜像
-├── Dockerfile.intel         # Intel QSV 容器镜像
-└── docker-compose*.yml      # Compose 启动模板
-```
+FFT 由本地 Web 界面、后端服务、SQLite 数据库和 FFmpeg 转码执行器组成。前端负责目录监控、文件管理、在线调用、系统信息、预设和报告等页面；后端负责硬件探测、任务调度、进度推送、历史记录和报告生成。
 
 运行时数据默认写在项目根目录或 `FFT_DATA_DIR` 指定目录中：
 
@@ -132,8 +133,6 @@ fft.db          # SQLite 数据库
 logs/fft.log    # 运行日志
 cache/          # 在线调用上传与输出缓存
 ```
-
-这些文件都属于本地运行数据，不应提交到 Git。
 
 ## 环境指标
 
@@ -161,47 +160,47 @@ FFT 会根据 `ffmpeg -encoders` 和轻量探测结果决定哪些预设可用�
 | `FFT_LOG_FILE` | `$FFT_DATA_DIR/logs/fft.log` | 日志文件路径 |
 | `FFT_OPEN_BROWSER` | `false` | 启动后是否自动打开浏览器 |
 
-发布包会把 `FFT_OPEN_BROWSER` 的默认值编译为 `true`；源码运行和 Docker 默认保持 `false`。
+发布包会默认打开浏览器；Docker 运行时默认不自动打开浏览器。
 
 ## 技术栈
 
 - 后端：Go、Gin、SQLite、WebSocket
 - 前端：React 18、TypeScript、Vite、Tailwind CSS、lucide-react
 - 转码：FFmpeg、ffprobe、SVT-AV1、libaom-av1、rav1e、NVENC、QSV、AMF
-- 构建：Docker、Docker Compose、GitHub Actions、GHCR
+- 部署：桌面发布包、Docker、Docker Compose
+
+## 鸣谢
+
+- [FFmpeg](https://ffmpeg.org/)：提供核心音视频处理能力。
+- [ChanningHe/ffforge](https://github.com/ChanningHe/ffforge)：前端设计与交互参考。
 
 ## 转码效果示例
 
-实际体积、速度和画质取决于片源、分辨率、运动复杂度、编码器、CRF / QP、preset、硬件驱动和 FFmpeg 版本。下面是推荐记录方式，便于在 README 或 Release Note 中补充真实样片数据：
+以 iPhone 16 Pro 拍摄的 4K 60fps HDR 视频为例（HEVC → AV1，CRF 28，Preset 8）：
 
-| 场景 | 源文件 | 推荐预设 | 输出 | 记录指标 |
-| --- | --- | --- | --- | --- |
-| 1080p 录屏 | H.264 / HEVC | SVT-AV1 均衡或视觉无损 | AV1 + AAC / copy audio | 体积、平均码率、耗时、VMAF 或主观观感 |
-| 4K 游戏录像 | H.264 高码率 | Intel QSV / NVIDIA NVENC | AV1 MP4 | 速度、GPU 占用、输出体积 |
-| 归档素材 | HEVC / ProRes | SVT-AV1 高质量 | AV1 MKV / MP4 | 画质、码率、兼容性 |
+| 项目         | IMG_2634.MOV (原始)                   | IMG_2634_av1.mp4 (转码后)             |
+|--------------|---------------------------------------|---------------------------------------|
+| 封装格式     | QuickTime MOV                         | MP4 (ISOM)                            |
+| 文件大小     | 44 MB                                 | 13 MB                                 |
+| 总码率       | 53.4 Mbps                             | 15.3 Mbps                             |
+| 视频编码     | H.265/HEVC (Main 10)                  | AV1 (Main, libsvtav1)                 |
+| 视频码率     | 52.7 Mbps                             | 15.1 Mbps                             |
+| 分辨率       | 3840x2160 (含旋转-90°)                | 2160x3840 (已旋转写入)                |
+| 帧率         | 60fps                                 | 60fps                                 |
+| 像素格式     | yuv420p10le (10bit)                   | yuv420p10le (10bit)                   |
+| 色彩空间     | BT.2020 / HLG                         | BT.2020 / HLG                         |
+| B帧          | 有 (has_b_frames=2)                   | 无 (has_b_frames=0)                   |
+| 音频编码     | AAC LC, 立体声, 48kHz                 | AAC LC, 立体声, 48kHz (一致)          |
+| 额外音轨     | 4声道 Apple Spatial Audio (apac)      | 无 (丢失)                             |
+| Dolby Vision | 有 (Profile 8, 兼容HLG)              | 无 (丢失)                             |
+| 元数据轨道   | 6条 (陀螺仪、GPS等)                   | 无 (丢失)                             |
+| 设备信息     | iPhone 16 Pro, iOS 26.3               | 无 (丢失)                             |
 
-建议提交示例时同时记录：
-
-- FFmpeg 版本
-- CPU / GPU 型号
-- 输入格式、分辨率、帧率、码率
-- 使用预设和关键参数
-- 输出格式、体积、耗时和主观结论
+> **注意：** AV1 转码后会丢失部分元数据，请根据需要自行修改 ffmpeg 预设
 
 ## 路线图
 
-- 更完整的跨平台桌面封装。
-- 更细的硬件能力探测与失败原因提示。
-- 可导入导出的预设包。
-- 更丰富的任务报告模板。
-- 可选的多任务队列策略和并发控制。
-- 官方示例素材与公开转码效果截图。
-
-## 验证
-
-```bash
-npm run build
-npm run test
-```
-
-`npm run test` 会执行 Go 测试。构建前请确认 FFmpeg / ffprobe 在 PATH 中可用。
+- [ ] 集成视频质量评估指标（VMAF / SSIM / PSNR），转码完成后自动进行画质对比分析
+- [x] 任务列表增加详细日志输出，支持查看每个任务的完整 FFmpeg 执行日志
+- [ ] 新增音频转码选项，支持独立配置音频编码器、码率、采样率等参数
+- [x] 前端界面视觉重构，优化交互体验与整体布局设计
