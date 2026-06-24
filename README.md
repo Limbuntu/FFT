@@ -55,11 +55,11 @@ GitHub Release 会提供这些产物：
 services:
   fft-go:
     container_name: fft-go
-    image: ghcr.io/limbuntu/fft-go:latest
+    image: ghcr.nju.edu.cn/limbuntu/fft-go:latest
     # NVIDIA GPU:
-    # image: ghcr.io/limbuntu/fft-go:gpu
+    # image: ghcr.nju.edu.cn/limbuntu/fft-go:gpu
     # Intel GPU:
-    # image: ghcr.io/limbuntu/fft-go:intel
+    # image: ghcr.nju.edu.cn/limbuntu/fft-go:intel
     restart: unless-stopped
     ports:
       - "8166:8166"
@@ -101,13 +101,13 @@ open http://localhost:8166
 NVIDIA 示例：
 
 ```yaml
-image: ghcr.io/limbuntu/fft-go:gpu
+image: ghcr.nju.edu.cn/limbuntu/fft-go:gpu
 ```
 
 Intel 示例：
 
 ```yaml
-image: ghcr.io/limbuntu/fft-go:intel
+image: ghcr.nju.edu.cn/limbuntu/fft-go:intel
 ```
 
 ### 开发模式
