@@ -15,6 +15,10 @@ fft.db
 logs/
 cache/
 
+# CloudBase feedback pages are deployed separately.
+cloudbase-feedback/
+codex-mini-feedback-admin-mock.html
+
 # Build artifacts
 build/
 dist/

@@ -47,6 +47,18 @@ type Server struct {
 	presets      *presets.Service
 }
 
+const feedbackLogMaxBytes int64 = 768 * 1024
+
+var (
+	feedbackLogSecretPattern   = regexp.MustCompile(`(?i)\b(password|passwd|pwd|token|secret|api[_-]?key|authorization|smtp[_-]?pass)\b\s*[:=]\s*("[^"]*"|'[^']*'|[^\s,;]+)`)
+	feedbackUnixPathPattern    = regexp.MustCompile(`/(?:Users|home|Volumes|private|tmp|var|mnt|media)/[^\s"',;]+`)
+	feedbackWindowsPathPattern = regexp.MustCompile(`[A-Za-z]:\\[^\s"',;]+`)
+)
+
+var feedbackLogAllowedOrigins = map[string]bool{
+	"https://feedback-prod-d4gl0lj03892e606a-1251838363.tcloudbaseapp.com": true,
+}
+
 func New(cfg config.Config, db *fftdb.DB) *Server {
 	gin.SetMode(gin.ReleaseMode)
 	hub := websocket.NewHub()
@@ -195,6 +207,8 @@ func (s *Server) routes(r *gin.Engine) {
 	apiGroup.DELETE("/presets/:name", s.deletePreset)
 	apiGroup.POST("/presets/:name/reset", s.resetPreset)
 
+	apiGroup.OPTIONS("/logs/feedback", s.feedbackLogOptions)
+	apiGroup.GET("/logs/feedback", s.feedbackLog)
 	apiGroup.GET("/logs/download", s.downloadLogs)
 
 	r.Static("/assets", filepath.Join(s.cfg.StaticDir, "assets"))
@@ -383,6 +397,7 @@ func (s *Server) manageWatchFolder(c *gin.Context) {
 	files := watchfolders.ScanFolder(record.Path)
 	tasks := s.transcoder.Tasks()
 	activeOutputs := activeTaskOutputs(tasks)
+	taskOutputs := transcodeTaskOutputs(tasks, record.Path)
 	items := make([]models.ManagedFileItem, 0, len(files))
 	targetRoot := targetRootFor(record)
 	var sourceSize, targetSize int64
@@ -395,7 +410,10 @@ func (s *Server) manageWatchFolder(c *gin.Context) {
 		}
 		sourceMeta := probeMediaMeta(file.Path)
 		copyAV1Source := record.CopyAV1 && isAV1Codec(sourceMeta.VideoCodec)
-		target := targetPathFor(record, file.Path, copyAV1Source)
+		target := taskOutputs[cleanPathKey(file.Path)]
+		if target == "" {
+			target = targetPathFor(record, file.Path, copyAV1Source)
+		}
 		var targetErr error
 		var targetFileName string
 		var targetRelativePath string
@@ -414,7 +432,7 @@ func (s *Server) manageWatchFolder(c *gin.Context) {
 		}
 		targetMeta := probeMediaMeta(target)
 		status, message := managedStatus(file.Size, targetFileSize, targetExists, targetErr)
-		if target != "" && activeOutputs[target] {
+		if target != "" && activeOutputs[cleanPathKey(target)] {
 			status = "running"
 			message = "正在转码"
 		}
@@ -574,9 +592,12 @@ func (s *Server) startOnlineTranscode(c *gin.Context) {
 		Encoder:       c.DefaultPostForm("encoder", "libsvtav1"),
 		CRF:           formInt(c, "crf", 28),
 		Preset:        models.PresetValue(c.DefaultPostForm("preset", "8")),
+		Prefix:        c.PostForm("prefix"),
+		PrefixEnabled: boolPtr(c.DefaultPostForm("prefix_enabled", "false") == "true"),
 		Suffix:        c.PostForm("suffix"),
 		SuffixEnabled: boolPtr(c.DefaultPostForm("suffix_enabled", "true") != "false"),
 		OutputExt:     c.DefaultPostForm("output_ext", "auto"),
+		AutoMP4:       boolPtr(c.DefaultPostForm("auto_mp4", "true") != "false"),
 		OutputDest:    "custom",
 		OutputDir:     outputDir,
 		ExtraArgs:     strings.Fields(c.PostForm("extra_args")),
@@ -730,6 +751,91 @@ func (s *Server) downloadLogs(c *gin.Context) {
 	c.FileAttachment(s.cfg.LogFile, "fft.log")
 }
 
+func (s *Server) feedbackLog(c *gin.Context) {
+	setFeedbackLogCORS(c)
+	data, err := readLogTail(s.cfg.LogFile, feedbackLogMaxBytes)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Log file not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	text := strings.TrimSpace(redactFeedbackLogText(string(data)))
+	if text == "" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Log file is empty"})
+		return
+	}
+	content := []byte(text)
+	c.JSON(http.StatusOK, gin.H{
+		"name":     "fft-feedback-log.txt",
+		"size":     len(content),
+		"mime":     "text/plain; charset=utf-8",
+		"dataUrl":  "data:text/plain;charset=utf-8;base64," + base64.StdEncoding.EncodeToString(content),
+		"redacted": true,
+	})
+}
+
+func (s *Server) feedbackLogOptions(c *gin.Context) {
+	setFeedbackLogCORS(c)
+	c.Status(http.StatusNoContent)
+}
+
+func setFeedbackLogCORS(c *gin.Context) {
+	origin := c.GetHeader("Origin")
+	if !feedbackLogAllowedOrigins[origin] {
+		return
+	}
+	c.Header("Access-Control-Allow-Origin", origin)
+	c.Header("Access-Control-Allow-Methods", "GET, OPTIONS")
+	c.Header("Access-Control-Allow-Headers", "Accept, Content-Type")
+	c.Header("Vary", "Origin")
+}
+
+func readLogTail(path string, maxBytes int64) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	offset := int64(0)
+	if info.Size() > maxBytes {
+		offset = info.Size() - maxBytes
+	}
+	if _, err := file.Seek(offset, io.SeekStart); err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes))
+	if err != nil {
+		return nil, err
+	}
+	if offset > 0 {
+		text := string(data)
+		if index := strings.IndexByte(text, '\n'); index >= 0 && index+1 < len(text) {
+			data = []byte(text[index+1:])
+		}
+	}
+	return data, nil
+}
+
+func redactFeedbackLogText(text string) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		redacted := redactPathText(line)
+		redacted = feedbackUnixPathPattern.ReplaceAllStringFunc(redacted, redactPathForLog)
+		redacted = feedbackWindowsPathPattern.ReplaceAllStringFunc(redacted, redactPathForLog)
+		lines[i] = feedbackLogSecretPattern.ReplaceAllString(redacted, "$1=xxxxx")
+	}
+	return strings.Join(lines, "\n")
+}
+
 func decodePath(value string) (string, bool) {
 	data, err := base64.RawURLEncoding.DecodeString(value)
 	if err != nil {
@@ -794,7 +900,6 @@ func targetPathFor(folder fftdb.WatchFolderRecord, sourcePath string, preserveSo
 	if folder.OutputDest == "" {
 		return ""
 	}
-	preserve := len(preserveSourceContainer) > 0 && preserveSourceContainer[0]
 	sourceDir := filepath.Dir(sourcePath)
 	sourceBase := strings.TrimSuffix(filepath.Base(sourcePath), filepath.Ext(sourcePath))
 	relDir := filepath.Dir(relativePath(folder.Path, sourcePath))
@@ -802,9 +907,6 @@ func targetPathFor(folder fftdb.WatchFolderRecord, sourcePath string, preserveSo
 		relDir = ""
 	}
 	ext := filepath.Ext(sourcePath)
-	if !preserve && incompatibleManagedExts[strings.ToLower(ext)] {
-		ext = ".mp4"
-	}
 	name := sourceBase + "_av1" + ext
 	switch folder.OutputDest {
 	case "subfolder":
@@ -817,11 +919,6 @@ func targetPathFor(folder fftdb.WatchFolderRecord, sourcePath string, preserveSo
 		}
 	}
 	return filepath.Join(sourceDir, name)
-}
-
-var incompatibleManagedExts = map[string]bool{
-	".mov": true, ".avi": true, ".wmv": true, ".flv": true,
-	".ts": true, ".mpg": true, ".mpeg": true,
 }
 
 func flattenedOutputStem(relDir, stem string) string {
@@ -861,15 +958,60 @@ func activeTaskOutputs(tasks []models.TaskInfo) map[string]bool {
 			continue
 		}
 		if task.OutputPath != "" {
-			outputs[task.OutputPath] = true
+			outputs[cleanPathKey(task.OutputPath)] = true
 		}
 		for _, result := range task.Results {
 			if result.OutputPath != "" {
-				outputs[result.OutputPath] = true
+				outputs[cleanPathKey(result.OutputPath)] = true
 			}
 		}
 	}
 	return outputs
+}
+
+func transcodeTaskOutputs(tasks []models.TaskInfo, folder string) map[string]string {
+	type taskOutput struct {
+		path       string
+		finishedAt time.Time
+	}
+	latest := map[string]taskOutput{}
+	outputs := map[string]string{}
+	for _, task := range tasks {
+		if !taskTouchesFolder(task, folder) {
+			continue
+		}
+		if task.OutputPath != "" && task.CurrentIndex >= 0 && task.CurrentIndex < len(task.Request.Files) {
+			sourcePath := task.Request.Files[task.CurrentIndex]
+			key := cleanPathKey(sourcePath)
+			outputTime := task.FinishedAt
+			if outputTime.IsZero() {
+				outputTime = task.CreatedAt
+			}
+			latest[key] = taskOutput{path: task.OutputPath, finishedAt: outputTime}
+		}
+		for _, result := range task.Results {
+			if result.InputPath == "" || result.OutputPath == "" {
+				continue
+			}
+			key := cleanPathKey(result.InputPath)
+			old := latest[key]
+			if old.path == "" || result.FinishedAt.After(old.finishedAt) {
+				latest[key] = taskOutput{path: result.OutputPath, finishedAt: result.FinishedAt}
+			}
+		}
+	}
+	for key, output := range latest {
+		outputs[key] = output.path
+	}
+	return outputs
+}
+
+func cleanPathKey(path string) string {
+	abs, err := filepath.Abs(path)
+	if err == nil {
+		path = abs
+	}
+	return strings.ToLower(filepath.Clean(path))
 }
 
 func managedSummary(folder fftdb.WatchFolderRecord, tasks []models.TaskInfo, fileCount int, sourceSize, targetSize int64, targetRoot string) models.ManagedFolderSummary {

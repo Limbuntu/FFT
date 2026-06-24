@@ -76,9 +76,12 @@ type TranscodeRequest struct {
 	ExtraArgs     []string                     `json:"extra_args"`
 	OutputDir     string                       `json:"output_dir"`
 	OutputDest    string                       `json:"output_dest"`
+	Prefix        string                       `json:"prefix"`
+	PrefixEnabled *bool                        `json:"prefix_enabled"`
 	Suffix        string                       `json:"suffix"`
 	SuffixEnabled *bool                        `json:"suffix_enabled"`
 	OutputExt     string                       `json:"output_ext"`
+	AutoMP4       *bool                        `json:"auto_mp4"`
 	FileOutputs   map[string]map[string]string `json:"file_outputs"`
 }
 
@@ -92,6 +95,9 @@ func (r *TranscodeRequest) Normalize() {
 	if r.OutputDest == "" {
 		r.OutputDest = "beside"
 	}
+	if r.PrefixEnabled == nil || !*r.PrefixEnabled {
+		r.Prefix = ""
+	}
 	if r.SuffixEnabled != nil && !*r.SuffixEnabled {
 		r.Suffix = ""
 	} else if r.Suffix == "" {
@@ -99,6 +105,10 @@ func (r *TranscodeRequest) Normalize() {
 	}
 	if r.OutputExt == "" {
 		r.OutputExt = "auto"
+	}
+	if r.AutoMP4 == nil {
+		value := true
+		r.AutoMP4 = &value
 	}
 	if r.FileOutputs == nil {
 		r.FileOutputs = map[string]map[string]string{}

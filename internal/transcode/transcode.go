@@ -176,7 +176,7 @@ func (s *Service) run(taskID string) {
 		if changed {
 			s.broadcast(map[string]any{
 				"type":    "toast",
-				"message": fmt.Sprintf("%s: %s 不支持 AV1，已自动转为 .mp4", filepath.Base(src), originalExt),
+				"message": fmt.Sprintf("%s: %s 不适合 AV1，已按高级设置改为 .mp4", filepath.Base(src), originalExt),
 				"level":   "info",
 			})
 		}
@@ -631,7 +631,8 @@ func buildOutputPath(src string, req models.TranscodeRequest, preserveSourceCont
 	}
 	changed := false
 	originalExt := ext
-	if !preserveSourceContainer && incompatibleAV1Exts[strings.ToLower(ext)] {
+	autoMP4 := req.AutoMP4 == nil || *req.AutoMP4
+	if !preserveSourceContainer && autoMP4 && incompatibleAV1Exts[strings.ToLower(ext)] {
 		ext = ".mp4"
 		changed = true
 	}
@@ -639,8 +640,10 @@ func buildOutputPath(src string, req models.TranscodeRequest, preserveSourceCont
 	fileOutput := req.FileOutputs[src]
 	dest := req.OutputDest
 	dir := req.OutputDir
+	prefix := req.Prefix
 	suffix := req.Suffix
 	if preserveSourceContainer {
+		prefix = ""
 		suffix = ""
 	}
 	if fileOutput != nil {
@@ -652,6 +655,9 @@ func buildOutputPath(src string, req models.TranscodeRequest, preserveSourceCont
 		}
 		if value, ok := fileOutput["suffix"]; ok && !preserveSourceContainer {
 			suffix = value
+		}
+		if value, ok := fileOutput["prefix"]; ok && !preserveSourceContainer {
+			prefix = value
 		}
 	}
 
@@ -668,7 +674,7 @@ func buildOutputPath(src string, req models.TranscodeRequest, preserveSourceCont
 	if ext == "" {
 		ext = ".mkv"
 	}
-	return filepath.Join(outDir, filepath.Base(base)+suffix+ext), changed, originalExt, nil
+	return filepath.Join(outDir, prefix+filepath.Base(base)+suffix+ext), changed, originalExt, nil
 }
 
 func shouldCopyAV1(src string, req models.TranscodeRequest) bool {

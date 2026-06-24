@@ -24,6 +24,7 @@ import {
   HardDrive,
   LayoutDashboard,
   Loader2,
+  MessageSquare,
   MoreHorizontal,
   Moon,
   Pencil,
@@ -142,9 +143,12 @@ type TranscodeForm = {
   encoder: string;
   crf: number;
   preset: number | string;
+  prefix: string;
+  prefix_enabled: boolean;
   suffix: string;
   suffix_enabled: boolean;
   output_ext: string;
+  auto_mp4: boolean;
   extra_args: string[];
 };
 
@@ -156,9 +160,12 @@ type TaskRequest = {
   extra_args?: string[];
   output_dir?: string;
   output_dest?: string;
+  prefix?: string;
+  prefix_enabled?: boolean;
   suffix?: string;
   suffix_enabled?: boolean;
   output_ext?: string;
+  auto_mp4?: boolean;
   file_outputs?: Record<string, Record<string, string>>;
 };
 
@@ -262,7 +269,9 @@ type OnlineJob = {
 };
 
 const emptyBrowser: FileBrowser = { current: '/', parent: null, entries: [] };
-const defaultForm: TranscodeForm = { encoder: 'libsvtav1', crf: 28, preset: 8, suffix: '_av1', suffix_enabled: true, output_ext: 'auto', extra_args: [] };
+const defaultForm: TranscodeForm = { encoder: 'libsvtav1', crf: 28, preset: 8, prefix: '', prefix_enabled: false, suffix: '_av1', suffix_enabled: true, output_ext: 'auto', auto_mp4: true, extra_args: [] };
+const feedbackURL = 'https://feedback-prod-d4gl0lj03892e606a-1251838363.tcloudbaseapp.com/feedback.html';
+const incompatibleAV1OutputExts = new Set(['.mov', '.avi', '.wmv', '.flv', '.ts', '.mpg', '.mpeg']);
 const qsvPresetLabels = ['veryslow', 'slower', 'slow', 'medium', 'fast', 'faster', 'veryfast', 'ultrafast'];
 const presetVendorFilters: { value: PresetVendorFilter; label: string }[] = [
   { value: 'cpu', label: 'CPU' },
@@ -340,9 +349,17 @@ function App() {
   const browserFolders = useMemo(() => fileBrowser.entries.filter((entry) => entry.is_dir), [fileBrowser.entries]);
   const onlineTaskIds = useMemo(() => new Set(onlineJobs.map((job) => job.task_id).filter(Boolean) as string[]), [onlineJobs]);
   const onlineTasks = useMemo(() => tasks.filter((task) => onlineTaskIds.has(task.task_id)), [onlineTaskIds, tasks]);
+  const managedFolder = useMemo(
+    () => watchFolders.find((wf) => wf.folder.path === managedFolderPath)?.folder || managedData?.folder,
+    [managedData?.folder, managedFolderPath, watchFolders],
+  );
   const managedItems = useMemo(
-    () => (managedData?.items || []).map((item) => ({ ...item, status: managedOverrides[item.id] || item.status })),
-    [managedData, managedOverrides],
+    () => (managedData?.items || []).map((item) => ({
+      ...item,
+      status: managedOverrides[item.id] || item.status,
+      target: previewManagedTarget(item, managedFolder, availablePresets, form),
+    })),
+    [availablePresets, form, managedData?.items, managedFolder, managedOverrides],
   );
   const managedFilteredItems = useMemo(
     () => managedItems.filter((item) => item.status === 'running' || managedActions.includes(item.status)),
@@ -350,8 +367,21 @@ function App() {
   );
 
   useEffect(() => {
+    if (tab !== 'files' && Object.keys(managedOverrides).length) {
+      setManagedOverrides({});
+    }
+  }, [managedOverrides, tab]);
+
+  useEffect(() => {
     if (!navItems.some((item) => item.id === tab)) setTab('console');
   }, [setTab, tab]);
+
+  useEffect(() => {
+    setForm((old) => {
+      const next = normalizedTranscodeForm(old);
+      return JSON.stringify(next) === JSON.stringify(old) ? old : next;
+    });
+  }, [setForm]);
 
   const loadWatchFolders = useCallback(
     async (isInit = false) => {
@@ -566,6 +596,44 @@ function App() {
     setNewFolderName('');
   }
 
+  async function browseToPreferred(path: string, fallback = '/') {
+    try {
+      await browseTo(path || fallback);
+    } catch (error) {
+      if (fallback && fallback !== path) {
+        await browseTo(fallback);
+        return;
+      }
+      showToast(errorMessage(error), 'error');
+    }
+  }
+
+  function outputFolderBrowseStart(path: string) {
+    const wf = watchFolders.find((item) => item.folder.path === path);
+    if (!wf) return path || '/';
+    const outputDest = normalizedOutputDest(wf.folder);
+    if (outputDest === 'custom' && wf.folder.output_dir) return wf.folder.output_dir;
+    if (outputDest === 'subfolder') return joinPath(wf.folder.path, 'AV1');
+    return wf.folder.path;
+  }
+
+  function openWatchFolderBrowser() {
+    setBrowserMode('watch');
+    void browseToPreferred('/');
+  }
+
+  function openReplaceWatchFolderBrowser(path: string) {
+    replacingFolderRef.current = path;
+    setBrowserMode('replace');
+    void browseToPreferred(path, '/');
+  }
+
+  function openOutputFolderBrowser(path: string) {
+    outputFolderRef.current = path;
+    setBrowserMode('output');
+    void browseToPreferred(outputFolderBrowseStart(path), path || '/');
+  }
+
   async function createFolder() {
     const name = newFolderName.trim();
     if (!name) return;
@@ -597,13 +665,15 @@ function App() {
     setWatchFolders((items) =>
       items.map((wf) => (wf.folder.path === folderPath ? { ...wf, folder: { ...wf.folder, ...patch } } : wf)),
     );
-    if (folderPath === managedFolderPath && patch.copy_av1 !== undefined) {
+    if (folderPath === managedFolderPath) {
       setManagedData((old) => old ? {
         ...old,
-        folder: { ...old.folder, copy_av1: patch.copy_av1 ?? old.folder.copy_av1 },
-        items: old.items.map((item) => reclassifyManagedAV1Item(item, patch.copy_av1 ?? old.folder.copy_av1)),
+        folder: { ...old.folder, ...patch },
+        items: patch.copy_av1 === undefined
+          ? old.items
+          : old.items.map((item) => reclassifyManagedAV1Item(item, patch.copy_av1 ?? old.folder.copy_av1)),
       } : old);
-      setManagedOverrides({});
+      if (patch.copy_av1 !== undefined) setManagedOverrides({});
     }
   }
 
@@ -630,7 +700,8 @@ function App() {
   }
 
   function buildFileOutputs(files: string[]) {
-    const map: Record<string, { output_dest: string; output_dir: string; suffix?: string; copy_av1?: string }> = {};
+    const map: Record<string, { output_dest: string; output_dir: string; prefix?: string; suffix?: string; copy_av1?: string }> = {};
+    const basePrefix = form.prefix_enabled === true ? form.prefix || '' : '';
     const baseSuffix = form.suffix_enabled !== false ? form.suffix || '_av1' : '';
     for (const file of files) {
       const wf = watchFolderForFile(file);
@@ -647,6 +718,7 @@ function App() {
         map[file] = {
           output_dest: outputDest === 'subfolder' ? 'custom' : outputDest,
           output_dir: outputDest === 'subfolder' ? joinPath(wf.folder.path, 'AV1') : wf.folder.output_dir || '',
+          prefix: copyAV1 ? '' : basePrefix,
           suffix,
           copy_av1: wf.folder.copy_av1 !== false ? 'true' : 'false',
         };
@@ -673,6 +745,7 @@ function App() {
     for (const group of groups) {
       await apiSend('/api/transcode', {
         ...group.request,
+        auto_mp4: form.auto_mp4 !== false,
         suffix_enabled: form.suffix_enabled !== false,
         files: group.files,
         file_outputs: buildFileOutputs(group.files),
@@ -722,9 +795,12 @@ function App() {
         body.append('encoder', form.encoder);
         body.append('crf', String(form.crf));
         body.append('preset', String(form.preset));
+        body.append('prefix', form.prefix_enabled === true ? form.prefix : '');
+        body.append('prefix_enabled', String(form.prefix_enabled === true));
         body.append('suffix', form.suffix_enabled !== false ? form.suffix : '');
         body.append('suffix_enabled', String(form.suffix_enabled !== false));
         body.append('output_ext', form.output_ext);
+        body.append('auto_mp4', String(form.auto_mp4 !== false));
         body.append('extra_args', extraArgs.join(' '));
         const result = await apiUpload<{ task_id: string; download_url: string }>('/api/online/transcode', body);
         setOnlineJobs((jobs) => jobs.map((job) => job.id === id ? {
@@ -839,7 +915,6 @@ function App() {
           <div key={toast.id} className={`toast ${toast.type}`}>{toast.message}</div>
         ))}
       </div>
-
       <div className={`app-shell ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
         <aside className="app-sidebar">
           <div className="sidebar-brand">
@@ -861,8 +936,7 @@ function App() {
             >
               {sidebarCollapsed ? <ChevronRight size={18} /> : <ChevronLeft size={18} />}
               <span>
-                <strong>{sidebarCollapsed ? '展开导航栏' : '折叠导航栏'}</strong>
-                <small>切换侧边栏宽度</small>
+                <strong>{sidebarCollapsed ? '展开' : '折叠'}</strong>
               </span>
             </button>
             {navItems.map((item) => {
@@ -885,7 +959,8 @@ function App() {
               <button className="theme-toggle" aria-label={isDark ? '切换到浅色模式' : '切换到深色模式'} title={isDark ? '浅色模式' : '深色模式'} onClick={() => setTheme(isDark ? 'light' : 'dark')}>
                 {isDark ? <Sun size={14} /> : <Moon size={14} />}
               </button>
-              <a className="sidebar-icon-link" href="https://github.com/Limbuntu/FFT" target="_blank" rel="noreferrer" title="GitHub"><Github size={14} /><span>GitHub</span></a>
+              <a className="sidebar-icon-link" href={feedbackURL} target="_blank" rel="noreferrer" title="提交反馈" aria-label="提交反馈"><MessageSquare size={14} /><span>反馈</span></a>
+              <a className="sidebar-icon-link icon-only" href="https://github.com/Limbuntu/FFT" target="_blank" rel="noreferrer" title="GitHub" aria-label="GitHub"><Github size={14} /></a>
               <a className="sidebar-log-link" href="/api/logs/download" title="日志"><Download size={13} /><span>日志</span></a>
             </div>
           </div>
@@ -901,13 +976,13 @@ function App() {
                 globalForm={form}
                 sysInfo={sysInfo}
                 systemUsage={systemUsage}
-                onBrowseWatchFolder={() => { setBrowserMode('watch'); void browseTo('/'); }}
+                onBrowseWatchFolder={openWatchFolderBrowser}
                 onRefreshWatchFolders={() => void loadWatchFolders(false)}
                 wfLoading={wfLoading}
                 onRemoveWatchFolder={(path) => void removeWatchFolder(path)}
                 onUpdateFolder={(path, patch) => updateFolder(path, patch)}
-                onReplaceWatchFolder={(path) => { replacingFolderRef.current = path; setBrowserMode('replace'); void browseTo('/'); }}
-                onBrowseOutputFolder={(path) => { outputFolderRef.current = path; setBrowserMode('output'); void browseTo('/'); }}
+                onReplaceWatchFolder={openReplaceWatchFolderBrowser}
+                onBrowseOutputFolder={openOutputFolderBrowser}
                 onStartFolderTranscode={(files) => void startTranscodeFor(files)}
                 onCancelTask={(taskID) => void cancelTranscodeTask(taskID)}
                 autoTranscode={autoTranscode}
@@ -954,11 +1029,18 @@ function App() {
                   void loadManagedFolder(path);
                 }}
                 onUpdateFolder={(path, patch) => updateFolder(path, patch)}
-                onBrowseOutputFolder={(path) => { outputFolderRef.current = path; setBrowserMode('output'); void browseTo('/'); }}
+                onBrowseOutputFolder={openOutputFolderBrowser}
                 onRefresh={() => loadManagedFolder(managedFolderPath)}
                 onStartFolderTranscode={(files) => void startTranscodeFor(files)}
                 onToggleAction={(status) => setManagedActions((old) => old.includes(status) ? old.filter((item) => item !== status) : [...old, status])}
                 onToggleItemStatus={(item) => setManagedOverrides((old) => ({ ...old, [item.id]: item.status === 'keep' ? 'add' : 'keep' }))}
+                onToggleAllItems={(status) => {
+                  setManagedOverrides(Object.fromEntries(
+                    (managedData?.items || [])
+                      .filter((item) => item.status !== 'running')
+                      .map((item) => [item.id, status]),
+                  ));
+                }}
                 onRunSelected={() => void startManagedTranscode()}
                 onReport={() => {
                   const task = tasks.find((item) => item.request?.files?.some((file) => pathBelongsToFolder(file, managedFolderPath)) && item.status === 'done');
@@ -1011,7 +1093,28 @@ function App() {
                       displayValue={presetDisplayValue(form.encoder, form.preset)}
                       onChange={(value) => setForm((old) => ({ ...old, preset: value }))}
                     />
-                    <div className="grid gap-3 sm:grid-cols-2">
+	                    <div className="grid gap-3 lg:grid-cols-3">
+	                      <label className="field">
+	                        <span className="field-label-row">
+	                          <span>输出前缀</span>
+	                          <span className="mini-toggle" title={form.prefix_enabled === true ? '关闭输出前缀' : '开启输出前缀'}>
+	                            <input
+	                              className="mini-toggle-input"
+	                              type="checkbox"
+	                              checked={form.prefix_enabled === true}
+	                              aria-label="开启输出前缀"
+	                              onChange={(event) => setForm((old) => ({ ...old, prefix_enabled: event.target.checked }))}
+	                            />
+	                            <span className="mini-toggle-track" aria-hidden="true" />
+	                          </span>
+	                        </span>
+	                        <input
+	                          value={form.prefix}
+	                          disabled={form.prefix_enabled !== true}
+	                          placeholder="例如 av1_"
+	                          onChange={(event) => setForm((old) => ({ ...old, prefix: event.target.value }))}
+	                        />
+	                      </label>
 	                      <label className="field">
 	                        <span className="field-label-row">
 	                          <span>输出后缀</span>
@@ -1027,13 +1130,25 @@ function App() {
 	                          </span>
 	                        </span>
 	                        <input
-                          value={form.suffix}
-                          disabled={form.suffix_enabled === false}
-                          onChange={(event) => setForm((old) => ({ ...old, suffix: event.target.value }))}
-                        />
-                      </label>
-                      <label className="field"><span>输出格式</span><select value={form.output_ext} onChange={(event) => setForm((old) => ({ ...old, output_ext: event.target.value }))}><option value="auto">自动</option><option value=".mkv">.mkv</option><option value=".mp4">.mp4</option><option value=".webm">.webm</option></select></label>
-                    </div>
+	                          value={form.suffix}
+	                          disabled={form.suffix_enabled === false}
+	                          onChange={(event) => setForm((old) => ({ ...old, suffix: event.target.value }))}
+	                        />
+	                      </label>
+	                      <label className="field"><span>输出格式</span><select value={form.output_ext} onChange={(event) => setForm((old) => ({ ...old, output_ext: event.target.value }))}><option value="auto">自动</option><option value=".mkv">.mkv</option><option value=".mp4">.mp4</option><option value=".webm">.webm</option></select></label>
+	                    </div>
+                    <label className="toggle-card transcode-advanced-toggle">
+                      <span>
+                        <strong>容器不兼容时自动改为 MP4</strong>
+                        <small>{form.auto_mp4 !== false ? '已开启，auto 遇到 MOV/AVI/TS 等会输出 MP4' : '已关闭，auto 严格沿用源文件后缀'}</small>
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={form.auto_mp4 !== false}
+                        onChange={(event) => setForm((old) => ({ ...old, auto_mp4: event.target.checked }))}
+                      />
+                      <i aria-hidden="true" />
+                    </label>
                   </div>
                 </section>
 
@@ -1455,10 +1570,10 @@ function WatchFoldersPanel({
           const needsCustomOutput = outputDest === 'custom' && !wf.folder.output_dir;
           const outputUnset = !outputDest;
           const taskName = wf.folder.label || folderName(wf.folder.path);
-          const presetLabel = folderPresetLabel(wf.folder, presets, globalForm);
           const folderFiles = wf.files.map((file) => file.path);
           const activeTask = tasks.find((task) => isActiveTranscodeTask(task) && taskTouchesFolder(task, wf.folder.path));
-          const activeProgress = activeTask ? taskProgressPercent(activeTask) : 0;
+          const activeProgress = activeTask ? taskOverallProgressPercent(activeTask) : 0;
+          const activeProgressLabel = formatProgressPercent(activeProgress);
           return (
             <div
               key={wf.folder.path}
@@ -1476,10 +1591,15 @@ function WatchFoldersPanel({
                       placeholder={folderName(wf.folder.path)}
                       aria-label="目录监控备注名"
                     />
-                    <span className="watch-folder-preset" title={presetLabel}>{presetLabel}</span>
+                    <FolderPresetPicker
+                      folder={wf.folder}
+                      presets={presets}
+                      globalForm={globalForm}
+                      onChange={(presetName) => void onUpdateFolder(wf.folder.path, { preset_name: presetName })}
+                    />
                     <div className="watch-folder-meta">
                       <span className={`watch-folder-state ${activeTask ? 'running' : 'ok'}`}>
-                        {activeTask ? `转码中 ${activeProgress}%` : '监控中'}
+                        {activeTask ? `转码中 ${activeProgressLabel}` : '监控中'}
                       </span>
                       <span>{wf.folder.file_count} 个视频</span>
                       <span>{formatSize(wf.folder.total_size)}</span>
@@ -1518,7 +1638,7 @@ function WatchFoldersPanel({
                   {activeTask ? (
                     <>
                       <span>进度</span>
-                      <strong className="watch-folder-progress-text">{activeProgress}%</strong>
+                      <strong className="watch-folder-progress-text">{activeProgressLabel}</strong>
                     </>
                   ) : (
                     <>
@@ -1843,6 +1963,89 @@ function StatusChip({ tone, icon: Icon, label, value }: { tone: 'running' | 'upc
   );
 }
 
+function FolderPresetPicker({
+  folder,
+  presets,
+  globalForm,
+  onChange,
+}: {
+  folder: WatchFolder;
+  presets: Preset[];
+  globalForm: TranscodeForm;
+  onChange: (presetName: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [vendorFilter, setVendorFilter] = useState<PresetVendorFilter>('cpu');
+  const ref = useRef<HTMLDivElement>(null);
+  const label = folderPresetLabel(folder, presets, globalForm);
+  const selectedPreset = presets.find((preset) => preset.name === folder.preset_name);
+  const selectedVendor = selectedPreset ? presetVendor(selectedPreset.encoder) : presetVendor(globalForm.encoder);
+  const options = useMemo(
+    () => presets.filter((preset) => presetVendor(preset.encoder) === vendorFilter),
+    [presets, vendorFilter],
+  );
+
+  useClickOutside(ref, open, () => setOpen(false));
+
+  return (
+    <div className="file-manager-preset-picker" ref={ref}>
+      <button
+        className="file-manager-preset"
+        type="button"
+        title={label}
+        onClick={() => {
+          setVendorFilter(selectedVendor);
+          setOpen((value) => !value);
+        }}
+      >
+        {label}<ChevronDown size={12} />
+      </button>
+      {open && (
+        <div className="file-manager-preset-menu">
+          <div className="file-manager-preset-filter" aria-label="预设厂商筛选">
+            {presetVendorFilters.map((filter) => (
+              <button
+                key={filter.value}
+                className={vendorFilter === filter.value ? 'active' : ''}
+                type="button"
+                onClick={() => setVendorFilter(filter.value)}
+              >
+                {filter.label}
+              </button>
+            ))}
+          </div>
+          <button
+            className={!folder.preset_name ? 'active' : ''}
+            type="button"
+            onClick={() => {
+              onChange('');
+              setOpen(false);
+            }}
+          >
+            <strong>使用全局设置</strong>
+            <span>{folderPresetLabel({ ...folder, preset_name: '' }, presets, globalForm)}</span>
+          </button>
+          {options.map((preset) => (
+            <button
+              key={preset.name}
+              className={folder.preset_name === preset.name ? 'active' : ''}
+              type="button"
+              onClick={() => {
+                onChange(preset.name);
+                setOpen(false);
+              }}
+            >
+              <strong>{preset.name}</strong>
+              <span>{presetSummaryLine(preset)}</span>
+            </button>
+          ))}
+          {!options.length && <div className="file-manager-preset-empty">当前分类没有可用预设</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function FileManagerPage({
   watchFolders,
   selectedPath,
@@ -1861,6 +2064,7 @@ function FileManagerPage({
   onStartFolderTranscode,
   onToggleAction,
   onToggleItemStatus,
+  onToggleAllItems,
   onRunSelected,
   onReport,
   onCancel,
@@ -1884,6 +2088,7 @@ function FileManagerPage({
   onStartFolderTranscode: (files: string[]) => void;
   onToggleAction: (status: ManagedStatus) => void;
   onToggleItemStatus: (item: ManagedFileItem) => void;
+  onToggleAllItems: (status: ManagedStatus) => void;
   onRunSelected: () => void;
   onReport: () => void;
   onCancel: () => void;
@@ -1891,8 +2096,6 @@ function FileManagerPage({
   onAutoTranscodeChange: React.Dispatch<React.SetStateAction<boolean>>;
 }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [presetMenuOpen, setPresetMenuOpen] = useState(false);
-  const presetMenuRef = useRef<HTMLDivElement>(null);
   const [justCompleted, setJustCompleted] = useState<Set<string>>(() => new Set());
   const previousRunningRef = useRef<Set<string>>(new Set());
   const selectedWatchFolder = watchFolders.find((wf) => wf.folder.path === selectedPath) ?? null;
@@ -1901,20 +2104,25 @@ function FileManagerPage({
     for (const item of items) counts[item.status] += 1;
     return counts;
   }, [items]);
-  const progress = Math.round(data?.summary.progress || 0);
+  const toggleableItems = useMemo(() => items.filter((item) => item.status !== 'running'), [items]);
+  const allToggleableAdded = toggleableItems.length > 0 && toggleableItems.every((item) => item.status === 'add');
+  const progress = clampPercent(data?.summary.progress || 0);
+  const progressLabel = formatProgressPercent(progress);
   const currentPresetLabel = useMemo(
     () => selectedWatchFolder
       ? folderPresetLabel(selectedWatchFolder.folder, presets, globalForm)
       : managedFolderPresetLabel(tasks, presets, selectedPath, undefined, data?.summary.active_task_id),
-    [data?.summary.active_task_id, globalForm, presets, selectedPath, selectedWatchFolder, tasks],
+	    [data?.summary.active_task_id, globalForm, presets, selectedPath, selectedWatchFolder, tasks],
   );
   const targetProgress = useMemo(() => {
-    const map = new Map<string, number>();
+    const map = new Map<string, { progress: number; task: TaskInfo }>();
     for (const task of tasks) {
       if (task.status !== 'running' && task.status !== 'pending') continue;
-      if (!task.output_path) continue;
       const value = task.status === 'pending' ? 0 : Math.max(0, Math.min(100, task.current_file_progress || task.progress || 0));
-      map.set(task.output_path, value);
+      if (task.output_path) map.set(task.output_path, { progress: value, task });
+      const currentFile = task.request?.files?.[task.current_index];
+      if (currentFile) map.set(currentFile, { progress: value, task });
+      if (task.current_file) map.set(task.current_file, { progress: value, task });
     }
     return map;
   }, [tasks]);
@@ -1925,7 +2133,6 @@ function FileManagerPage({
     },
     [onRefresh, onUpdateFolder, selectedPath],
   );
-  useClickOutside(presetMenuRef, presetMenuOpen, () => setPresetMenuOpen(false));
 
   useEffect(() => {
     const running = new Set(items.filter((item) => item.status === 'running').map((item) => item.id));
@@ -1949,10 +2156,6 @@ function FileManagerPage({
   return (
     <section className="file-manager" aria-label="文件管理">
       <aside className="file-manager-rail">
-        <div className="file-manager-rail-actions">
-          <button className="btn primary" onClick={onRunSelected}><Play size={15} />立即执行</button>
-          <button className="btn" onClick={onReport}><FileText size={15} />生成报告</button>
-        </div>
         <div className="file-manager-folder-list">
           {watchFolders.map((wf) => (
             <button
@@ -1973,48 +2176,17 @@ function FileManagerPage({
           <div className="file-manager-title">
             <div className="file-manager-title-row">
               <h2>{data?.summary.name || '文件管理'}</h2>
-              {currentPresetLabel && (
-                <div className="file-manager-preset-picker" ref={presetMenuRef}>
-                  <button
-                    className="file-manager-preset"
-                    type="button"
-                    title={currentPresetLabel}
-                    disabled={!selectedWatchFolder}
-                    onClick={() => setPresetMenuOpen((open) => !open)}
-                  >
-                    {currentPresetLabel}<ChevronDown size={12} />
-                  </button>
-                  {presetMenuOpen && selectedWatchFolder && (
-                    <div className="file-manager-preset-menu">
-                      <button
-                        className={!selectedWatchFolder.folder.preset_name ? 'active' : ''}
-                        type="button"
-                        onClick={() => {
-                          void refreshAfterFolderUpdate(selectedWatchFolder.folder.path, { preset_name: '' });
-                          setPresetMenuOpen(false);
-                        }}
-                      >
-                        <strong>使用全局设置</strong>
-                        <span>{folderPresetLabel({ ...selectedWatchFolder.folder, preset_name: '' }, presets, globalForm)}</span>
-                      </button>
-                      {presets.map((preset) => (
-                        <button
-                          key={preset.name}
-                          className={selectedWatchFolder.folder.preset_name === preset.name ? 'active' : ''}
-                          type="button"
-                          onClick={() => {
-                            void refreshAfterFolderUpdate(selectedWatchFolder.folder.path, { preset_name: preset.name });
-                            setPresetMenuOpen(false);
-                          }}
-                        >
-                          <strong>{preset.name}</strong>
-                          <span>{presetSummaryLine(preset)}</span>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
+              {selectedWatchFolder ? (
+                <FolderPresetPicker
+                  folder={selectedWatchFolder.folder}
+                  presets={presets}
+                  globalForm={globalForm}
+                  onChange={(presetName) => void refreshAfterFolderUpdate(selectedWatchFolder.folder.path, { preset_name: presetName })}
+                />
+              ) : currentPresetLabel ? (
+                <span className="file-manager-preset passive" title={currentPresetLabel}>{currentPresetLabel}</span>
+              ) : null}
+              <button className="icon-btn file-manager-report-btn" title="生成报告" aria-label="生成报告" onClick={onReport}><FileText size={16} /></button>
             </div>
             <p><span>来源</span>{data?.summary.source || '-'}<span>目的地</span>{data?.summary.target || '-'}</p>
             <div className="file-manager-stats">
@@ -2026,11 +2198,18 @@ function FileManagerPage({
             </div>
           </div>
           <div className="file-manager-progress">
-            <strong>{progress}%</strong>
+            <strong>{progressLabel}</strong>
             <span>当前任务进度</span>
             <div className="file-manager-progress-actions">
+              <button
+                className={`btn file-manager-select-all ${allToggleableAdded ? 'active' : ''}`}
+                disabled={!toggleableItems.length}
+                onClick={() => onToggleAllItems(allToggleableAdded ? 'keep' : 'add')}
+              >
+                {allToggleableAdded ? '全不选' : '一键全选'}
+              </button>
               <button className="icon-btn" title="更多设置" disabled={!selectedWatchFolder} onClick={() => setSettingsOpen(true)}><MoreHorizontal size={18} /></button>
-              <button className="icon-btn file-manager-refresh" title="刷新" onClick={onRefresh}><RefreshCw className={loading ? 'animate-spin' : ''} size={16} /></button>
+              <button className="icon-btn file-manager-refresh" title={loading ? '正在刷新' : '刷新'} disabled={loading} onClick={onRefresh}><RefreshCw size={16} /></button>
               <button className="btn" disabled={!data?.summary.active_task_id} onClick={onCancel}><Square size={15} />取消</button>
             </div>
           </div>
@@ -2038,13 +2217,22 @@ function FileManagerPage({
 
         <div className="file-compare-list">
           {filteredItems.map((item) => (
-            <FileCompareRow
-              key={item.id}
-              item={item}
-              progress={targetProgress.get(item.target.path) || 0}
-              completedFlash={justCompleted.has(item.id)}
-              onToggleStatus={() => onToggleItemStatus(item)}
-            />
+            (() => {
+              const active = targetProgress.get(item.target.path)
+                || targetProgress.get(item.source.path)
+                || targetProgress.get(item.source.name)
+                || targetProgress.get(item.target.name);
+              return (
+                <FileCompareRow
+                  key={item.id}
+                  item={item}
+                  progress={active?.progress || 0}
+                  running={item.status === 'running' || Boolean(active)}
+                  completedFlash={justCompleted.has(item.id)}
+                  onToggleStatus={() => onToggleItemStatus(item)}
+                />
+              );
+            })()
           ))}
           {!filteredItems.length && <div className="empty-state compact">{loading ? '正在读取文件对比' : '当前筛选下没有文件'}</div>}
         </div>
@@ -2053,7 +2241,7 @@ function FileManagerPage({
           <StatusFilterButton status="keep" active={actions.includes('keep')} count={statusCounts.keep} onClick={() => onToggleAction('keep')} />
           <StatusFilterButton status="add" active={actions.includes('add')} count={statusCounts.add} onClick={() => onToggleAction('add')} />
           <StatusFilterButton status="force" active={actions.includes('force')} count={statusCounts.force} onClick={() => onToggleAction('force')} />
-          <span className="file-manager-action-hint">高亮项会显示在列表中</span>
+          <button className="btn primary file-manager-run-bottom" onClick={onRunSelected}><Play size={15} />立即执行</button>
         </div>
       </section>
       {settingsOpen && selectedWatchFolder && (
@@ -2078,36 +2266,39 @@ function FileManagerPage({
 function FileCompareRow({
   item,
   progress,
+  running,
   completedFlash,
   onToggleStatus,
 }: {
   item: ManagedFileItem;
   progress: number;
+  running: boolean;
   completedFlash: boolean;
   onToggleStatus: () => void;
 }) {
-  const canToggle = item.status === 'keep' || item.status === 'add';
+  const canToggle = !running && (item.status === 'keep' || item.status === 'add');
+  const actionStatus = running ? 'running' : item.status;
   return (
-    <div className={`file-compare-row status-${item.status}`}>
+    <div className={`file-compare-row status-${actionStatus}`}>
       <FileSideCard side={item.source} />
       <button
-        className={`file-compare-action ${item.status}`}
+        className={`file-compare-action ${actionStatus}`}
         type="button"
         disabled={!canToggle}
-        title={item.status === 'running' ? '正在转码' : canToggle ? '切换保持/新增' : '强制转码'}
+        title={running ? `正在转码 ${formatProgressPercent(progress)}` : canToggle ? '切换保持/新增' : '强制转码'}
         onClick={canToggle ? onToggleStatus : undefined}
       >
-        {item.status === 'keep' && <span className="action-minus" />}
-        {item.status === 'add' && <><Plus size={14} className="action-plus" /><ChevronRight size={23} /></>}
-        {item.status === 'force' && <ZapIcon />}
-        {item.status === 'running' && <Loader2 className="animate-spin" size={18} />}
+        {actionStatus === 'keep' && <span className="action-minus" />}
+        {actionStatus === 'add' && <><Plus size={14} className="action-plus" /><ChevronRight size={23} /></>}
+        {actionStatus === 'force' && <ZapIcon />}
+        {actionStatus === 'running' && <Loader2 className="animate-spin" size={18} />}
       </button>
       <FileSideCard
         side={item.target}
         muted={!item.target.exists}
-        message={item.status === 'add' ? undefined : item.message}
-        progress={item.status === 'running' ? progress : 0}
-        progressing={item.status === 'running'}
+        message={actionStatus === 'add' ? undefined : item.message}
+        progress={running ? progress : 0}
+        progressing={running}
         completedFlash={completedFlash}
       />
     </div>
@@ -2973,6 +3164,29 @@ function folderName(path: string) {
   return path.replace(/\/+$/, '').split('/').pop() || path || '/';
 }
 
+function pathBaseName(path: string) {
+  return path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || path;
+}
+
+function pathDir(path: string) {
+  const trimmed = path.replace(/[\\/]+$/, '');
+  const index = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
+  if (index <= 0) return index === 0 ? trimmed.slice(0, 1) : '';
+  return trimmed.slice(0, index);
+}
+
+function pathExt(path: string) {
+  const base = pathBaseName(path);
+  const index = base.lastIndexOf('.');
+  return index > 0 ? base.slice(index) : '';
+}
+
+function pathStem(path: string) {
+  const base = pathBaseName(path);
+  const ext = pathExt(base);
+  return ext ? base.slice(0, -ext.length) : base;
+}
+
 function splitArgs(text: string) {
   return text.trim() ? text.trim().split(/\s+/) : [];
 }
@@ -3020,11 +3234,24 @@ function isActiveTranscodeTask(task: TaskInfo) {
   return task.status === 'running' || task.status === 'pending';
 }
 
+function clampPercent(value: number) {
+  return Math.max(0, Math.min(100, value || 0));
+}
+
+function formatProgressPercent(value: number) {
+  return `${clampPercent(value).toFixed(1)}%`;
+}
+
 function taskProgressPercent(task: TaskInfo) {
   const value = task.status === 'pending'
     ? 0
     : task.current_file_progress || task.progress || 0;
-  return Math.round(Math.max(0, Math.min(100, value)));
+  return clampPercent(value);
+}
+
+function taskOverallProgressPercent(task: TaskInfo) {
+  const value = task.status === 'pending' ? 0 : task.progress || 0;
+  return clampPercent(value);
 }
 
 function makeResourcePoints(value: number) {
@@ -3078,11 +3305,60 @@ function transcodeRequestForFolder(folder: WatchFolder | undefined, presets: Pre
     encoder: preset.encoder,
     crf: preset.crf,
     preset: normalizedPresetValue(preset.encoder, preset.preset),
-    output_ext: preset.output_ext || globalForm.output_ext || 'auto',
+    output_ext: globalForm.output_ext || 'auto',
+    auto_mp4: globalForm.auto_mp4 !== false,
     suffix: globalForm.suffix,
     suffix_enabled: globalForm.suffix_enabled,
-    extra_args: preset.extra_args || [],
+	    extra_args: preset.extra_args || [],
+	    prefix: globalForm.prefix,
+	    prefix_enabled: globalForm.prefix_enabled,
+	  };
+	}
+
+function previewManagedTarget(item: ManagedFileItem, folder: WatchFolder | undefined, presets: Preset[], globalForm: TranscodeForm): ManagedFileSide {
+  if (!folder || item.target.exists || item.status === 'running') return item.target;
+  const targetPath = previewOutputPath(item.source.path, folder, presets, globalForm, isAV1CodecName(item.source.meta?.video_codec));
+  if (!targetPath) return item.target;
+  const name = pathBaseName(targetPath);
+  return {
+    ...item.target,
+    name,
+    path: targetPath,
+    relative_path: name,
   };
+}
+
+function previewOutputPath(sourcePath: string, folder: WatchFolder, presets: Preset[], globalForm: TranscodeForm, isAV1Source: boolean) {
+  const outputDest = normalizedOutputDest(folder);
+  if (!outputDest) return '';
+
+  const request = transcodeRequestForFolder(folder, presets, globalForm);
+  const copyAV1 = folder.copy_av1 !== false && isAV1Source;
+  const sourceExt = pathExt(sourcePath);
+  let ext = sourceExt;
+  if (!copyAV1 && request.output_ext && request.output_ext !== 'auto') {
+    ext = request.output_ext;
+  }
+  if (!copyAV1 && request.auto_mp4 !== false && incompatibleAV1OutputExts.has(ext.toLowerCase())) {
+    ext = '.mp4';
+  }
+  if (!ext) ext = '.mkv';
+
+  const prefix = copyAV1 || request.prefix_enabled === false ? '' : request.prefix || '';
+  const baseSuffix = copyAV1 || request.suffix_enabled === false ? '' : request.suffix || '';
+  const suffix = copyAV1
+    ? ''
+    : outputDest === 'subfolder' || outputDest === 'custom'
+      ? flattenedOutputSuffix(folder.path, sourcePath, baseSuffix)
+      : baseSuffix;
+  const stem = pathStem(sourcePath);
+  const outputDir = outputDest === 'subfolder'
+    ? joinPath(folder.path, 'AV1')
+    : outputDest === 'custom'
+      ? folder.output_dir
+      : pathDir(sourcePath);
+  if (!outputDir) return '';
+  return joinPath(outputDir, `${prefix}${stem}${suffix}${ext}`);
 }
 
 function groupFilesByTranscodeSettings(files: string[], watchFolders: WatchFolderResult[], presets: Preset[], globalForm: TranscodeForm) {
@@ -3095,6 +3371,7 @@ function groupFilesByTranscodeSettings(files: string[], watchFolders: WatchFolde
       crf: request.crf,
       preset: request.preset,
       output_ext: request.output_ext,
+      auto_mp4: request.auto_mp4 !== false,
       extra_args: request.extra_args || [],
     });
     const group = groups.get(key) || { request, files: [] };
@@ -3186,7 +3463,17 @@ function normalizedPreset<T extends Pick<Preset, 'encoder' | 'preset'>>(preset: 
 }
 
 function normalizedTranscodeForm(form: TranscodeForm): TranscodeForm {
-  return { ...form, preset: normalizedPresetValue(form.encoder, form.preset) };
+  return {
+    ...defaultForm,
+    ...form,
+    prefix: form.prefix ?? '',
+    prefix_enabled: form.prefix_enabled === true,
+    suffix: form.suffix ?? defaultForm.suffix,
+    suffix_enabled: form.suffix_enabled !== false,
+    auto_mp4: form.auto_mp4 !== false,
+    extra_args: form.extra_args || [],
+    preset: normalizedPresetValue(form.encoder, form.preset),
+  };
 }
 
 function presetToFormPatch(preset: Preset, fallbackOutputExt: string): Partial<TranscodeForm> {
@@ -3194,7 +3481,7 @@ function presetToFormPatch(preset: Preset, fallbackOutputExt: string): Partial<T
     encoder: preset.encoder,
     crf: preset.crf,
     preset: normalizedPresetValue(preset.encoder, preset.preset),
-    output_ext: preset.output_ext || fallbackOutputExt,
+    output_ext: fallbackOutputExt || 'auto',
     extra_args: preset.extra_args || [],
   };
 }

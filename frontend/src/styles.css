@@ -187,14 +187,15 @@ code {
 }
 
 .sidebar-nav-item.sidebar-collapse-btn {
-  border-color: var(--color-line);
-  background: var(--color-control);
+  border-color: transparent;
+  background: transparent;
   color: var(--color-soft);
+  box-shadow: none;
 }
 
 .sidebar-collapse-btn:hover {
-  border-color: var(--color-line-strong);
-  background: var(--color-control-hover);
+  border-color: transparent;
+  background: transparent;
   color: var(--color-ink);
 }
 
@@ -301,13 +302,22 @@ code {
 }
 
 .sidebar-footer-meta {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr auto auto;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.45rem 0.55rem;
 }
 
 .sidebar-version {
-  margin-right: auto;
+  grid-column: 1 / 3;
+  grid-row: 1;
+  margin-right: 0;
+}
+
+.sidebar-footer .theme-toggle {
+  grid-column: 3 / 4;
+  grid-row: 1;
+  justify-self: end;
 }
 
 .sidebar-log-link,
@@ -315,13 +325,49 @@ code {
   display: inline-flex;
   align-items: center;
   gap: 0.32rem;
+  min-width: 0;
   color: var(--color-soft);
   font-weight: 600;
+  line-height: 1;
   text-decoration: none;
+  white-space: nowrap;
+}
+
+.sidebar-icon-link:not(.icon-only),
+.sidebar-log-link {
+  min-height: 1.75rem;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 0 0.35rem;
+}
+
+.sidebar-icon-link.icon-only {
+  width: 1.75rem;
+  height: 1.75rem;
+  justify-content: center;
+}
+
+.sidebar-icon-link:first-of-type {
+  grid-column: 1 / 2;
+  grid-row: 2;
+  justify-self: start;
+}
+
+.sidebar-icon-link.icon-only {
+  grid-column: 2 / 3;
+  grid-row: 2;
+  justify-self: center;
+}
+
+.sidebar-log-link {
+  grid-column: 3 / 4;
+  grid-row: 2;
+  justify-self: end;
 }
 
 .sidebar-log-link:hover,
 .sidebar-icon-link:hover {
+  background: var(--color-control-hover);
   color: var(--color-ink);
 }
 
@@ -361,6 +407,7 @@ code {
 }
 
 .sidebar-collapsed .sidebar-footer-meta {
+  display: flex;
   flex-direction: column;
   gap: 0.45rem;
 }
@@ -796,7 +843,7 @@ code {
 .watch-folder-card {
   position: relative;
   display: grid;
-  overflow: hidden;
+  overflow: visible;
   border: 1px solid var(--color-line);
   border-radius: 10px;
   background: var(--color-elevated);
@@ -885,23 +932,6 @@ code {
 .watch-folder-title-input::placeholder {
   color: var(--color-ink);
   opacity: 1;
-}
-
-.watch-folder-preset {
-  display: inline-flex;
-  width: fit-content;
-  max-width: min(44rem, 100%);
-  align-items: center;
-  overflow: visible;
-  border: 1px solid var(--color-line);
-  border-radius: 999px;
-  background: var(--color-table-head);
-  color: var(--color-soft);
-  padding: 0.16rem 0.5rem;
-  font-size: 0.72rem;
-  font-weight: 760;
-  line-height: 1.25;
-  white-space: normal;
 }
 
 .watch-folder-meta {
@@ -1275,24 +1305,8 @@ code {
 }
 
 .file-manager-rail {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
   height: 100%;
   overflow: hidden;
-}
-
-.file-manager-rail-actions {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0.45rem;
-  border-bottom: 1px solid var(--color-line);
-  padding: 0.65rem;
-}
-
-.file-manager-rail-actions .btn {
-  min-width: 0;
-  padding-inline: 0.5rem;
-  white-space: nowrap;
 }
 
 .file-manager-folder-list {
@@ -1385,6 +1399,11 @@ code {
   min-width: 0;
 }
 
+.watch-folder-title-block > .file-manager-preset-picker {
+  width: fit-content;
+  max-width: min(44rem, 100%);
+}
+
 .file-manager-preset {
   display: inline-flex;
   max-width: min(42rem, 100%);
@@ -1408,6 +1427,12 @@ code {
   cursor: default;
 }
 
+.file-manager-report-btn {
+  width: 2rem;
+  height: 2rem;
+  min-height: 2rem;
+}
+
 .file-manager-preset-menu {
   position: absolute;
   z-index: 20;
@@ -1424,6 +1449,37 @@ code {
   padding: 0.45rem;
 }
 
+.file-manager-preset-filter {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.3rem;
+  margin-bottom: 0.35rem;
+  border-bottom: 1px solid var(--color-line);
+  padding-bottom: 0.4rem;
+}
+
+.file-manager-preset-filter button {
+  display: inline-flex;
+  min-height: 1.85rem;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--color-line);
+  border-radius: 999px;
+  background: var(--color-control);
+  color: var(--color-soft);
+  padding: 0.25rem 0.45rem;
+  font-size: 0.68rem;
+  font-weight: 800;
+  text-align: center;
+}
+
+.file-manager-preset-filter button:hover,
+.file-manager-preset-filter button.active {
+  border-color: var(--color-line-strong);
+  background: var(--color-ink);
+  color: var(--color-bg);
+}
+
 .file-manager-preset-menu button {
   display: grid;
   border: 0;
@@ -1435,9 +1491,17 @@ code {
   cursor: pointer;
 }
 
-.file-manager-preset-menu button:hover,
-.file-manager-preset-menu button.active {
+.file-manager-preset-menu > button:hover,
+.file-manager-preset-menu > button.active {
   background: var(--color-control-hover);
+}
+
+.file-manager-preset-empty {
+  border-radius: 8px;
+  color: var(--color-muted);
+  padding: 0.65rem;
+  font-size: 0.76rem;
+  text-align: center;
 }
 
 .file-manager-preset-menu strong {
@@ -1505,7 +1569,7 @@ code {
 
 .file-manager-progress-actions {
   display: grid;
-  grid-template-columns: 2.25rem 2.25rem auto;
+  grid-template-columns: auto 2.25rem 2.25rem auto;
   align-items: center;
   justify-content: end;
   gap: 0.45rem;
@@ -1523,6 +1587,17 @@ code {
   justify-content: center;
   padding-inline: 0.7rem;
   white-space: nowrap;
+}
+
+.file-manager-progress-actions .file-manager-select-all {
+  min-width: 5.9rem;
+  color: var(--color-soft);
+}
+
+.file-manager-progress-actions .file-manager-select-all.active {
+  border-color: #16a34a;
+  background: #dcfce7;
+  color: #166534;
 }
 
 .file-manager-refresh {
@@ -1570,7 +1645,7 @@ code {
   position: absolute;
   inset: 0 auto 0 0;
   width: var(--file-progress, 0%);
-  background: rgb(147 197 253 / 0.32);
+  background: linear-gradient(90deg, rgb(147 197 253 / 0.42), rgb(191 219 254 / 0.3));
   opacity: 0;
   pointer-events: none;
   transition: width 220ms ease, opacity 160ms ease;
@@ -1578,6 +1653,10 @@ code {
 
 .file-side-card.progressing::before {
   opacity: 1;
+}
+
+.file-side-card.progressing {
+  border-color: color-mix(in srgb, #60a5fa 48%, var(--color-line));
 }
 
 .file-side-card.completed-flash {
@@ -1809,11 +1888,9 @@ code {
   color: var(--color-brand);
 }
 
-.file-manager-action-hint {
+.file-manager-run-bottom {
   margin-left: auto;
-  color: var(--color-muted);
-  font-size: 0.78rem;
-  white-space: nowrap;
+  min-width: 7.8rem;
 }
 
 .folder-route {
