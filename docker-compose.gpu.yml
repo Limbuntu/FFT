@@ -1,7 +1,7 @@
 # GPU version: docker compose -f docker-compose.yml -f docker-compose.gpu.yml up
 services:
-  fft:
-    image: ghcr.io/limbuntu/fft:gpu
+  fft-go:
+    image: ghcr.io/limbuntu/fft-go:gpu
     deploy:
       resources:
         reservations:

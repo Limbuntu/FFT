@@ -1,6 +1,6 @@
 services:
-  fft:
-    image: ghcr.io/limbuntu/fft:latest
+  fft-go:
+    image: ghcr.io/limbuntu/fft-go:latest
     ports:
       - "8166:8166"
     volumes:

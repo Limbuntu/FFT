@@ -1,0 +1,34 @@
+.git
+.github
+.gitea
+.DS_Store
+.idea
+.venv
+node_modules
+frontend/node_modules
+frontend/dist
+frontend/*.tsbuildinfo
+
+# Runtime data
+*.db
+*.db-shm
+*.db-wal
+fft.db
+bench_history.json
+presets.json
+watchfolders.json
+data
+logs
+cache
+server
+
+# Build outputs
+build
+dist
+release
+.tools
+.cache
+
+# Separately deployed feedback pages
+cloudbase-feedback
+codex-mini-feedback-admin-mock.html
