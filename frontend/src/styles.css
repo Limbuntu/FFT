@@ -1660,7 +1660,7 @@ code {
 }
 
 .file-side-card.completed-flash {
-  animation: file-card-complete-flash 1s ease-out;
+  animation: file-card-complete-flash 5s ease-out;
 }
 
 .file-side-card.completed-flash::before {

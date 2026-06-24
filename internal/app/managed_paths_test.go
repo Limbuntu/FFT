@@ -4,7 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/limbuntu/fft/internal/models"
 	fftdb "github.com/limbuntu/fft/internal/store"
 )
 
@@ -70,5 +72,47 @@ func TestSelectManagedTargetPrefersExistingInferredPath(t *testing.T) {
 	}
 	if info == nil || info.Size() == 0 {
 		t.Fatalf("expected file info for inferred target")
+	}
+}
+
+func TestActiveTaskOutputsOnlyIncludesCurrentUnfinishedOutput(t *testing.T) {
+	root := t.TempDir()
+	finished := filepath.Join(root, "done.mp4")
+	current := filepath.Join(root, "current.mp4")
+	task := models.TaskInfo{
+		Status:     models.TaskRunning,
+		OutputPath: current,
+		Results: []models.TaskFileResult{{
+			InputPath:  filepath.Join(root, "done.mov"),
+			OutputPath: finished,
+			FinishedAt: time.Now(),
+		}},
+	}
+
+	outputs := activeTaskOutputs([]models.TaskInfo{task})
+	if !outputs[cleanPathKey(current)] {
+		t.Fatalf("current output was not marked active")
+	}
+	if outputs[cleanPathKey(finished)] {
+		t.Fatalf("finished output was incorrectly marked active")
+	}
+}
+
+func TestActiveTaskOutputsSkipsOutputPathAlreadyFinished(t *testing.T) {
+	root := t.TempDir()
+	finished := filepath.Join(root, "done.mp4")
+	task := models.TaskInfo{
+		Status:     models.TaskRunning,
+		OutputPath: finished,
+		Results: []models.TaskFileResult{{
+			InputPath:  filepath.Join(root, "done.mov"),
+			OutputPath: finished,
+			FinishedAt: time.Now(),
+		}},
+	}
+
+	outputs := activeTaskOutputs([]models.TaskInfo{task})
+	if outputs[cleanPathKey(finished)] {
+		t.Fatalf("finished current output was incorrectly marked active")
 	}
 }

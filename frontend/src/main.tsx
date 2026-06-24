@@ -280,6 +280,7 @@ const presetVendorFilters: { value: PresetVendorFilter; label: string }[] = [
   { value: 'amd', label: 'AMD' },
 ];
 const watchFolderScanIntervalMs = 60_000;
+const completedFlashMs = 5_000;
 const navItems: { id: Tab; label: string; description: string; icon: typeof Activity }[] = [
   { id: 'console', label: '控制台', description: '查看处理概览和运行状态', icon: LayoutDashboard },
   { id: 'online', label: '在线调用', description: '拖拽上传文件并在浏览器下载转码结果', icon: CloudUpload },
@@ -384,8 +385,8 @@ function App() {
   }, [setForm]);
 
   const loadWatchFolders = useCallback(
-    async (isInit = false) => {
-      setWfLoading(true);
+    async (isInit = false, showLoading = true) => {
+      if (showLoading) setWfLoading(true);
       try {
         const data = await apiGet<WatchFolderResult[]>('/api/watchfolders');
         setWatchFolders(data);
@@ -405,9 +406,9 @@ function App() {
       } catch (error) {
         showToast(errorMessage(error), 'error');
       } finally {
-      setWfLoading(false);
-    }
-  },
+        if (showLoading) setWfLoading(false);
+      }
+    },
     [autoTranscode, showToast],
   );
 
@@ -521,7 +522,7 @@ function App() {
 
   useEffect(() => {
     const timer = window.setInterval(() => {
-      if (watchFolders.length) void loadWatchFolders(false);
+      if (watchFolders.length) void loadWatchFolders(false, false);
     }, watchFolderScanIntervalMs);
     return () => window.clearInterval(timer);
   }, [loadWatchFolders, watchFolders.length]);
@@ -985,7 +986,7 @@ function App() {
                 sysInfo={sysInfo}
                 systemUsage={systemUsage}
                 onBrowseWatchFolder={openWatchFolderBrowser}
-                onRefreshWatchFolders={() => void loadWatchFolders(false)}
+                onRefreshWatchFolders={() => void loadWatchFolders(false, true)}
                 wfLoading={wfLoading}
                 onRemoveWatchFolder={(path) => void removeWatchFolder(path)}
                 onUpdateFolder={(path, patch) => updateFolder(path, patch)}
@@ -2157,7 +2158,7 @@ function FileManagerPage({
         completed.forEach((id) => next.delete(id));
         return next;
       });
-    }, 1000);
+    }, completedFlashMs);
     return () => window.clearTimeout(timer);
   }, [items]);
 

@@ -50,9 +50,12 @@ type Server struct {
 const feedbackLogMaxBytes int64 = 768 * 1024
 
 var (
-	feedbackLogSecretPattern   = regexp.MustCompile(`(?i)\b(password|passwd|pwd|token|secret|api[_-]?key|authorization|smtp[_-]?pass)\b\s*[:=]\s*("[^"]*"|'[^']*'|[^\s,;]+)`)
-	feedbackUnixPathPattern    = regexp.MustCompile(`/(?:Users|home|Volumes|private|tmp|var|mnt|media)/[^\s"',;]+`)
-	feedbackWindowsPathPattern = regexp.MustCompile(`[A-Za-z]:\\[^\s"',;]+`)
+	feedbackLogSecretPattern   = regexp.MustCompile(`(?i)\b(password|passwd|pwd|token|access[_-]?token|refresh[_-]?token|secret|client[_-]?secret|api[_-]?key|authorization|smtp[_-]?pass|cookie|set-cookie|gitea[_-]?token|github[_-]?token|registry[_-]?token)\b(\s*[:=]\s*)("[^"]*"|'[^']*'|(?:Bearer|Basic)\s+[^\s,;]+|[^\s,;]+)`)
+	feedbackAuthHeaderPattern  = regexp.MustCompile(`(?i)\b(Authorization\s*:\s*)(?:Bearer|Basic)\s+[^\s,;]+`)
+	feedbackUnixPathPattern    = regexp.MustCompile(`(?:file://)?(?:~|/(?:Users|home|Volumes|private|tmp|var|mnt|media))/[^"',;\n]*?\.[A-Za-z0-9]{1,8}`)
+	feedbackWindowsPathPattern = regexp.MustCompile(`(?:file://)?[A-Za-z]:\\[^"',;\n]*?\.[A-Za-z0-9]{1,8}`)
+	feedbackPrivateIPPattern   = regexp.MustCompile(`\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}|127\.\d{1,3}\.\d{1,3}\.\d{1,3})(?::\d+)?\b`)
+	feedbackSensitiveKey       = regexp.MustCompile(`(?i)^(password|passwd|pwd|token|access[_-]?token|refresh[_-]?token|secret|client[_-]?secret|api[_-]?key|authorization|smtp[_-]?pass|cookie|set-cookie|gitea[_-]?token|github[_-]?token|registry[_-]?token)$`)
 )
 
 var feedbackLogAllowedOrigins = map[string]bool{
@@ -134,10 +137,12 @@ func redactURLPathForLog(rawPath string) string {
 			pairs[i] = key + "=" + redactPathText(value)
 			continue
 		}
-		if looksLikeFilesystemPath(decoded) {
+		if feedbackSensitiveKey.MatchString(key) {
+			pairs[i] = key + "=xxxxx"
+		} else if looksLikeFilesystemPath(decoded) {
 			pairs[i] = key + "=" + redactPathForLog(decoded)
 		} else {
-			pairs[i] = key + "=" + redactPathText(decoded)
+			pairs[i] = key + "=" + redactSensitiveLogText(decoded)
 		}
 	}
 	parsed.RawQuery = strings.Join(pairs, "&")
@@ -145,6 +150,7 @@ func redactURLPathForLog(rawPath string) string {
 }
 
 func redactPathText(text string) string {
+	text = redactFilesystemPaths(text)
 	fields := strings.Fields(text)
 	if len(fields) == 0 {
 		return text
@@ -750,7 +756,15 @@ func (s *Server) downloadLogs(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Log file not found"})
 		return
 	}
-	c.FileAttachment(s.cfg.LogFile, "fft.log")
+	data, err := os.ReadFile(s.cfg.LogFile)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	content := []byte(redactFeedbackLogText(string(data)))
+	filename := fmt.Sprintf("fft-redacted-%s.log", logTimestamp())
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+	c.Data(http.StatusOK, "text/plain; charset=utf-8", content)
 }
 
 func (s *Server) feedbackLog(c *gin.Context) {
@@ -770,13 +784,18 @@ func (s *Server) feedbackLog(c *gin.Context) {
 		return
 	}
 	content := []byte(text)
+	filename := fmt.Sprintf("fft-feedback-log-%s.txt", logTimestamp())
 	c.JSON(http.StatusOK, gin.H{
-		"name":     "fft-feedback-log.txt",
+		"name":     filename,
 		"size":     len(content),
 		"mime":     "text/plain; charset=utf-8",
 		"dataUrl":  "data:text/plain;charset=utf-8;base64," + base64.StdEncoding.EncodeToString(content),
 		"redacted": true,
 	})
+}
+
+func logTimestamp() string {
+	return time.Now().Format("20060102-150405")
 }
 
 func (s *Server) feedbackLogOptions(c *gin.Context) {
@@ -827,15 +846,27 @@ func readLogTail(path string, maxBytes int64) ([]byte, error) {
 }
 
 func redactFeedbackLogText(text string) string {
+	text = strings.ToValidUTF8(text, "�")
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	lines := strings.Split(text, "\n")
 	for i, line := range lines {
-		redacted := redactPathText(line)
-		redacted = feedbackUnixPathPattern.ReplaceAllStringFunc(redacted, redactPathForLog)
-		redacted = feedbackWindowsPathPattern.ReplaceAllStringFunc(redacted, redactPathForLog)
-		lines[i] = feedbackLogSecretPattern.ReplaceAllString(redacted, "$1=xxxxx")
+		lines[i] = redactSensitiveLogText(line)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func redactSensitiveLogText(text string) string {
+	redacted := redactPathText(text)
+	redacted = feedbackAuthHeaderPattern.ReplaceAllString(redacted, "${1}xxxxx")
+	redacted = feedbackLogSecretPattern.ReplaceAllString(redacted, "${1}${2}xxxxx")
+	redacted = feedbackPrivateIPPattern.ReplaceAllString(redacted, "x.x.x.x")
+	return redacted
+}
+
+func redactFilesystemPaths(text string) string {
+	redacted := feedbackWindowsPathPattern.ReplaceAllStringFunc(text, redactPathForLog)
+	redacted = feedbackUnixPathPattern.ReplaceAllStringFunc(redacted, redactPathForLog)
+	return redacted
 }
 
 func decodePath(value string) (string, bool) {
@@ -1049,16 +1080,21 @@ func activeTaskOutputs(tasks []models.TaskInfo) map[string]bool {
 		if task.Status != models.TaskRunning && task.Status != models.TaskPending {
 			continue
 		}
-		if task.OutputPath != "" {
+		if task.OutputPath != "" && !taskOutputFinished(task, task.OutputPath) {
 			outputs[cleanPathKey(task.OutputPath)] = true
-		}
-		for _, result := range task.Results {
-			if result.OutputPath != "" {
-				outputs[cleanPathKey(result.OutputPath)] = true
-			}
 		}
 	}
 	return outputs
+}
+
+func taskOutputFinished(task models.TaskInfo, outputPath string) bool {
+	key := cleanPathKey(outputPath)
+	for _, result := range task.Results {
+		if result.OutputPath != "" && cleanPathKey(result.OutputPath) == key {
+			return true
+		}
+	}
+	return false
 }
 
 func transcodeTaskOutputs(tasks []models.TaskInfo, folder string) map[string]string {
