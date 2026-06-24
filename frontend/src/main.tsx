@@ -964,7 +964,7 @@ function App() {
 
           <div className="sidebar-footer">
             <div className="sidebar-footer-meta">
-              <span className="sidebar-version">FFT v2.2.2</span>
+              <span className="sidebar-version">FFT v2.2.3</span>
               <button className="theme-toggle" aria-label={isDark ? '切换到浅色模式' : '切换到深色模式'} title={isDark ? '浅色模式' : '深色模式'} onClick={() => setTheme(isDark ? 'light' : 'dark')}>
                 {isDark ? <Sun size={14} /> : <Moon size={14} />}
               </button>
