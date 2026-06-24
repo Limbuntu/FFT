@@ -219,6 +219,7 @@ func (s *Server) routes(r *gin.Engine) {
 	apiGroup.POST("/presets/:name/reset", s.resetPreset)
 
 	apiGroup.OPTIONS("/logs/feedback", s.feedbackLogOptions)
+	apiGroup.OPTIONS("/logs/download", s.feedbackLogOptions)
 	apiGroup.GET("/logs/feedback", s.feedbackLog)
 	apiGroup.GET("/logs/download", s.downloadLogs)
 
@@ -752,19 +753,13 @@ func (s *Server) resetPreset(c *gin.Context) {
 }
 
 func (s *Server) downloadLogs(c *gin.Context) {
+	setFeedbackLogCORS(c)
 	if _, err := os.Stat(s.cfg.LogFile); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Log file not found"})
 		return
 	}
-	data, err := os.ReadFile(s.cfg.LogFile)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	content := []byte(redactFeedbackLogText(string(data)))
-	filename := fmt.Sprintf("fft-redacted-%s.log", logTimestamp())
-	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
-	c.Data(http.StatusOK, "text/plain; charset=utf-8", content)
+	c.Header("Access-Control-Expose-Headers", "Content-Disposition, Content-Type")
+	c.FileAttachment(s.cfg.LogFile, fmt.Sprintf("fft-%s.log", logTimestamp()))
 }
 
 func (s *Server) feedbackLog(c *gin.Context) {
