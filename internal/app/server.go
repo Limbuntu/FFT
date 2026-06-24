@@ -59,6 +59,11 @@ var feedbackLogAllowedOrigins = map[string]bool{
 	"https://feedback-prod-d4gl0lj03892e606a-1251838363.tcloudbaseapp.com": true,
 }
 
+var incompatibleAV1OutputExts = map[string]bool{
+	".mov": true, ".avi": true, ".wmv": true, ".flv": true,
+	".ts": true, ".mpg": true, ".mpeg": true,
+}
+
 func New(cfg config.Config, db *fftdb.DB) *Server {
 	gin.SetMode(gin.ReleaseMode)
 	hub := websocket.NewHub()
@@ -398,6 +403,7 @@ func (s *Server) manageWatchFolder(c *gin.Context) {
 	tasks := s.transcoder.Tasks()
 	activeOutputs := activeTaskOutputs(tasks)
 	taskOutputs := transcodeTaskOutputs(tasks, record.Path)
+	naming := managedOutputNamingFromQuery(c)
 	items := make([]models.ManagedFileItem, 0, len(files))
 	targetRoot := targetRootFor(record)
 	var sourceSize, targetSize int64
@@ -410,11 +416,9 @@ func (s *Server) manageWatchFolder(c *gin.Context) {
 		}
 		sourceMeta := probeMediaMeta(file.Path)
 		copyAV1Source := record.CopyAV1 && isAV1Codec(sourceMeta.VideoCodec)
-		target := taskOutputs[cleanPathKey(file.Path)]
-		if target == "" {
-			target = targetPathFor(record, file.Path, copyAV1Source)
-		}
-		var targetErr error
+		taskTarget := taskOutputs[cleanPathKey(file.Path)]
+		inferredTarget := targetPathFor(record, file.Path, copyAV1Source, naming)
+		target, targetInfo, targetErr := selectManagedTarget(taskTarget, inferredTarget, activeOutputs)
 		var targetFileName string
 		var targetRelativePath string
 		targetExists := false
@@ -422,9 +426,7 @@ func (s *Server) manageWatchFolder(c *gin.Context) {
 		if target != "" {
 			targetFileName = filepath.Base(target)
 			targetRelativePath = targetFileName
-			var targetInfo os.FileInfo
-			targetInfo, targetErr = os.Stat(target)
-			targetExists = targetErr == nil && !targetInfo.IsDir()
+			targetExists = targetErr == nil && targetInfo != nil && !targetInfo.IsDir()
 			if targetExists {
 				targetFileSize = targetInfo.Size()
 				targetSize += targetFileSize
@@ -896,7 +898,42 @@ func targetRootFor(folder fftdb.WatchFolderRecord) string {
 	return ""
 }
 
-func targetPathFor(folder fftdb.WatchFolderRecord, sourcePath string, preserveSourceContainer ...bool) string {
+type managedOutputNaming struct {
+	Prefix        string
+	PrefixEnabled bool
+	Suffix        string
+	SuffixEnabled bool
+	OutputExt     string
+	AutoMP4       bool
+}
+
+func managedOutputNamingFromQuery(c *gin.Context) managedOutputNaming {
+	naming := managedOutputNaming{
+		Suffix:        "_av1",
+		SuffixEnabled: true,
+		OutputExt:     "auto",
+		AutoMP4:       true,
+	}
+	if c.Query("prefix_enabled") == "true" {
+		naming.PrefixEnabled = true
+		naming.Prefix = c.Query("prefix")
+	}
+	if c.Query("suffix_enabled") == "false" {
+		naming.SuffixEnabled = false
+		naming.Suffix = ""
+	} else if suffix, ok := c.GetQuery("suffix"); ok {
+		naming.Suffix = suffix
+	}
+	if outputExt := c.Query("output_ext"); outputExt != "" {
+		naming.OutputExt = outputExt
+	}
+	if c.Query("auto_mp4") == "false" {
+		naming.AutoMP4 = false
+	}
+	return naming
+}
+
+func targetPathFor(folder fftdb.WatchFolderRecord, sourcePath string, preserveSourceContainer bool, naming managedOutputNaming) string {
 	if folder.OutputDest == "" {
 		return ""
 	}
@@ -907,24 +944,45 @@ func targetPathFor(folder fftdb.WatchFolderRecord, sourcePath string, preserveSo
 		relDir = ""
 	}
 	ext := filepath.Ext(sourcePath)
-	name := sourceBase + "_av1" + ext
+	if !preserveSourceContainer && naming.OutputExt != "" && naming.OutputExt != "auto" {
+		ext = naming.OutputExt
+	}
+	if !preserveSourceContainer && naming.AutoMP4 && incompatibleAV1OutputExts[strings.ToLower(ext)] {
+		ext = ".mp4"
+	}
+	if ext == "" {
+		ext = ".mkv"
+	}
+	prefix := ""
+	if !preserveSourceContainer && naming.PrefixEnabled {
+		prefix = naming.Prefix
+	}
+	suffix := ""
+	if !preserveSourceContainer && naming.SuffixEnabled {
+		suffix = naming.Suffix
+	}
+	name := prefix + sourceBase + suffix + ext
 	switch folder.OutputDest {
 	case "subfolder":
-		name = flattenedOutputStem(relDir, sourceBase) + "_av1" + ext
+		if !preserveSourceContainer {
+			name = prefix + sourceBase + flattenedOutputSuffix(relDir, suffix) + ext
+		}
 		return filepath.Join(folder.Path, "AV1", name)
 	case "custom":
 		if folder.OutputDir != "" {
-			name = flattenedOutputStem(relDir, sourceBase) + "_av1" + ext
+			if !preserveSourceContainer {
+				name = prefix + sourceBase + flattenedOutputSuffix(relDir, suffix) + ext
+			}
 			return filepath.Join(folder.OutputDir, name)
 		}
 	}
 	return filepath.Join(sourceDir, name)
 }
 
-func flattenedOutputStem(relDir, stem string) string {
+func flattenedOutputSuffix(relDir, suffix string) string {
 	relDir = strings.Trim(relDir, string(filepath.Separator))
 	if relDir == "" {
-		return stem
+		return suffix
 	}
 	parts := strings.Split(filepath.ToSlash(relDir), "/")
 	clean := make([]string, 0, len(parts)+1)
@@ -934,8 +992,42 @@ func flattenedOutputStem(relDir, stem string) string {
 			clean = append(clean, part)
 		}
 	}
-	clean = append(clean, stem)
-	return strings.Join(clean, "_")
+	if len(clean) == 0 {
+		return suffix
+	}
+	return "_" + strings.Join(clean, "_") + suffix
+}
+
+func selectManagedTarget(taskTarget, inferredTarget string, activeOutputs map[string]bool) (string, os.FileInfo, error) {
+	candidates := make([]string, 0, 3)
+	add := func(path string) {
+		if path == "" {
+			return
+		}
+		key := cleanPathKey(path)
+		for _, candidate := range candidates {
+			if cleanPathKey(candidate) == key {
+				return
+			}
+		}
+		candidates = append(candidates, path)
+	}
+	if taskTarget != "" && activeOutputs[cleanPathKey(taskTarget)] {
+		add(taskTarget)
+	}
+	add(inferredTarget)
+	add(taskTarget)
+	for _, candidate := range candidates {
+		info, err := os.Stat(candidate)
+		if err == nil && !info.IsDir() {
+			return candidate, info, nil
+		}
+	}
+	if len(candidates) == 0 {
+		return "", nil, nil
+	}
+	info, err := os.Stat(candidates[0])
+	return candidates[0], info, err
 }
 
 func managedStatus(sourceSize, targetSize int64, targetExists bool, targetErr error) (string, string) {

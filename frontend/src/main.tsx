@@ -445,14 +445,22 @@ function App() {
     }
     setManagedLoading(true);
     try {
-      setManagedData(await apiGet<ManagedFolderResponse>(`/api/watchfolders/${pathToB64(path)}/manage`));
+      const params = new URLSearchParams({
+        prefix: form.prefix_enabled === true ? form.prefix || '' : '',
+        prefix_enabled: String(form.prefix_enabled === true),
+        suffix: form.suffix_enabled !== false ? form.suffix || '_av1' : '',
+        suffix_enabled: String(form.suffix_enabled !== false),
+        output_ext: form.output_ext || 'auto',
+        auto_mp4: String(form.auto_mp4 !== false),
+      });
+      setManagedData(await apiGet<ManagedFolderResponse>(`/api/watchfolders/${pathToB64(path)}/manage?${params.toString()}`));
       setManagedOverrides({});
     } catch (error) {
       showToast(errorMessage(error), 'error');
     } finally {
       setManagedLoading(false);
     }
-  }, [showToast]);
+  }, [form.auto_mp4, form.output_ext, form.prefix, form.prefix_enabled, form.suffix, form.suffix_enabled, showToast]);
 
   const loadPresets = useCallback(async () => {
     try {
@@ -955,7 +963,7 @@ function App() {
 
           <div className="sidebar-footer">
             <div className="sidebar-footer-meta">
-              <span className="sidebar-version">FFT v2.2</span>
+              <span className="sidebar-version">FFT v2.2.1</span>
               <button className="theme-toggle" aria-label={isDark ? '切换到浅色模式' : '切换到深色模式'} title={isDark ? '浅色模式' : '深色模式'} onClick={() => setTheme(isDark ? 'light' : 'dark')}>
                 {isDark ? <Sun size={14} /> : <Moon size={14} />}
               </button>
@@ -3291,11 +3299,24 @@ function managedFolderPresetLabel(tasks: TaskInfo[], presets: Preset[], folder: 
 function folderPresetLabel(folder: WatchFolder, presets: Preset[], globalForm: TranscodeForm) {
   const preset = presets.find((item) => item.name === folder.preset_name);
   if (preset) return presetSummaryLabel(preset);
-  return `全局设置 · ${globalForm.encoder} · CRF ${globalForm.crf} · Preset ${presetDisplayValue(globalForm.encoder, globalForm.preset)}`;
+  const globalPresetName = globalPresetNameForForm(presets, globalForm);
+  return `全局设置 · ${globalPresetName} · ${globalForm.encoder} · CRF ${globalForm.crf} · Preset ${presetDisplayValue(globalForm.encoder, globalForm.preset)}`;
 }
 
 function presetSummaryLabel(preset: Preset) {
   return `${preset.name} · ${preset.encoder} · CRF ${preset.crf} · Preset ${presetDisplayValue(preset.encoder, preset.preset)}`;
+}
+
+function globalPresetNameForForm(presets: Preset[], form: TranscodeForm) {
+  const normalized = normalizedTranscodeForm(form);
+  const matched = presets.find((preset) => {
+    const sameArgs = JSON.stringify(preset.extra_args || []) === JSON.stringify(normalized.extra_args || []);
+    return preset.encoder === normalized.encoder
+      && Number(preset.crf) === Number(normalized.crf)
+      && String(normalizedPresetValue(preset.encoder, preset.preset)) === String(normalized.preset)
+      && sameArgs;
+  });
+  return matched?.name || '自定义';
 }
 
 function transcodeRequestForFolder(folder: WatchFolder | undefined, presets: Preset[], globalForm: TranscodeForm): TaskRequest {
@@ -3345,7 +3366,7 @@ function previewOutputPath(sourcePath: string, folder: WatchFolder, presets: Pre
   if (!ext) ext = '.mkv';
 
   const prefix = copyAV1 || request.prefix_enabled === false ? '' : request.prefix || '';
-  const baseSuffix = copyAV1 || request.suffix_enabled === false ? '' : request.suffix || '';
+  const baseSuffix = copyAV1 || request.suffix_enabled === false ? '' : request.suffix || '_av1';
   const suffix = copyAV1
     ? ''
     : outputDest === 'subfolder' || outputDest === 'custom'
