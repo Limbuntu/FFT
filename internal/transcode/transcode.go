@@ -3,6 +3,7 @@ package transcode
 import (
 	"bufio"
 	"context"
+	"crypto/md5"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -19,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/limbuntu/fft/internal/models"
@@ -58,9 +60,13 @@ type Service struct {
 	lastPersist map[string]time.Time
 	broadcaster Broadcaster
 	store       TaskStore
+	cacheDir    string
 }
 
-func New(broadcaster Broadcaster, store TaskStore) *Service {
+func New(broadcaster Broadcaster, store TaskStore, cacheDir string) *Service {
+	if cacheDir == "" {
+		cacheDir = filepath.Join(os.TempDir(), "fft-cache")
+	}
 	s := &Service{
 		tasks:       map[string]*models.TaskInfo{},
 		cancels:     map[string]context.CancelFunc{},
@@ -69,6 +75,7 @@ func New(broadcaster Broadcaster, store TaskStore) *Service {
 		lastPersist: map[string]time.Time{},
 		broadcaster: broadcaster,
 		store:       store,
+		cacheDir:    cacheDir,
 	}
 	s.loadPersistedTasks()
 	return s
@@ -173,6 +180,11 @@ func (s *Service) run(taskID string) {
 			s.fail(taskID, err.Error())
 			return
 		}
+		stagePath, err := s.stagingPath(taskID, idx, dst)
+		if err != nil {
+			s.fail(taskID, err.Error())
+			return
+		}
 		if changed {
 			s.broadcast(map[string]any{
 				"type":    "toast",
@@ -188,13 +200,13 @@ func (s *Service) run(taskID string) {
 			t.OutputPath = dst
 			t.Message = ""
 		})
-		s.setPartial(taskID, dst)
+		s.setPartial(taskID, stagePath)
 		s.notify(taskID)
 
 		duration := probeDuration(src)
 		if s.status(taskID) == models.TaskCancelled {
-			if err := removePartialOutput(dst); err != nil {
-				log.Printf("remove partial output failed %s: %s", redactPathForLog(dst), sanitizeLogText(err.Error(), dst))
+			if err := removePartialOutput(stagePath); err != nil {
+				log.Printf("remove partial output failed %s: %s", redactPathForLog(stagePath), sanitizeLogText(err.Error(), stagePath))
 			}
 			return
 		}
@@ -202,15 +214,33 @@ func (s *Service) run(taskID string) {
 		s.durations[src] = duration
 		s.mu.Unlock()
 
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(stagePath), 0o755); err != nil {
 			s.fail(taskID, err.Error())
 			return
 		}
 		if copyAV1 {
-			if err := copyFile(src, dst); err != nil {
+			if err := copyFile(src, stagePath); err != nil {
 				s.fail(taskID, err.Error())
 				return
 			}
+			if err := verifyMatchingMD5(src, stagePath); err != nil {
+				_ = removePartialOutput(stagePath)
+				log.Printf("Copy verification failed for %s -> %s: %s", redactPathForLog(src), redactPathForLog(stagePath), sanitizeLogText(err.Error(), src, stagePath))
+				s.fail(taskID, err.Error())
+				return
+			}
+			if err := validateMediaFile(stagePath); err != nil {
+				_ = removePartialOutput(stagePath)
+				log.Printf("Staged media validation failed for %s: %s", redactPathForLog(stagePath), sanitizeLogText(err.Error(), stagePath))
+				s.fail(taskID, err.Error())
+				return
+			}
+			if err := s.publishStagedOutput(taskID, stagePath, dst); err != nil {
+				_ = removePartialOutput(stagePath)
+				s.fail(taskID, err.Error())
+				return
+			}
+			_ = removePartialOutput(stagePath)
 			fileFinishedAt := time.Now()
 			originalSize := fileSize(src)
 			outputSize := fileSize(dst)
@@ -238,15 +268,15 @@ func (s *Service) run(taskID string) {
 		if taskStatusLocked(s.tasks[taskID]) == models.TaskCancelled {
 			s.mu.Unlock()
 			cancel()
-			if err := removePartialOutput(dst); err != nil {
-				log.Printf("remove partial output failed %s: %s", redactPathForLog(dst), sanitizeLogText(err.Error(), dst))
+			if err := removePartialOutput(stagePath); err != nil {
+				log.Printf("remove partial output failed %s: %s", redactPathForLog(stagePath), sanitizeLogText(err.Error(), stagePath))
 			}
 			return
 		}
 		s.cancels[taskID] = cancel
 		s.mu.Unlock()
 
-		cmd := exec.CommandContext(ctx, "ffmpeg", buildFFmpegArgs(src, dst, task.Request)...)
+		cmd := exec.CommandContext(ctx, "ffmpeg", buildFFmpegArgs(src, stagePath, task.Request)...)
 		stderr, err := cmd.StderrPipe()
 		if err != nil {
 			cancel()
@@ -255,13 +285,13 @@ func (s *Service) run(taskID string) {
 		}
 		cmd.Stdout = io.Discard
 		logVideoMetadata(src)
-		log.Printf("Transcode cmd: ffmpeg %s", sanitizeLogText(strings.Join(cmd.Args[1:], " "), src, dst))
+		log.Printf("Transcode cmd: ffmpeg %s", sanitizeLogText(strings.Join(cmd.Args[1:], " "), src, stagePath, dst))
 
 		if err := cmd.Start(); err != nil {
 			cancel()
 			if s.status(taskID) == models.TaskCancelled {
-				if err := removePartialOutput(dst); err != nil {
-					log.Printf("remove partial output failed %s: %s", redactPathForLog(dst), sanitizeLogText(err.Error(), dst))
+				if err := removePartialOutput(stagePath); err != nil {
+					log.Printf("remove partial output failed %s: %s", redactPathForLog(stagePath), sanitizeLogText(err.Error(), stagePath))
 				}
 				return
 			}
@@ -288,12 +318,13 @@ func (s *Service) run(taskID string) {
 		s.mu.Unlock()
 
 		if status == models.TaskCancelled {
-			if err := removePartialOutput(dst); err != nil {
-				log.Printf("remove partial output failed %s: %s", redactPathForLog(dst), sanitizeLogText(err.Error(), dst))
+			if err := removePartialOutput(stagePath); err != nil {
+				log.Printf("remove partial output failed %s: %s", redactPathForLog(stagePath), sanitizeLogText(err.Error(), stagePath))
 			}
 			return
 		}
 		if err != nil {
+			_ = removePartialOutput(stagePath)
 			detail := progress.Tail()
 			message := fmt.Sprintf("ffmpeg exited: %v", err)
 			if detail != "" {
@@ -303,6 +334,18 @@ func (s *Service) run(taskID string) {
 			s.fail(taskID, message)
 			return
 		}
+		if err := validateMediaFile(stagePath); err != nil {
+			_ = removePartialOutput(stagePath)
+			log.Printf("Staged media validation failed for %s: %s", redactPathForLog(stagePath), sanitizeLogText(err.Error(), stagePath))
+			s.fail(taskID, err.Error())
+			return
+		}
+		if err := s.publishStagedOutput(taskID, stagePath, dst); err != nil {
+			_ = removePartialOutput(stagePath)
+			s.fail(taskID, err.Error())
+			return
+		}
+		_ = removePartialOutput(stagePath)
 		fileFinishedAt := time.Now()
 		originalSize := fileSize(src)
 		outputSize := fileSize(dst)
@@ -455,8 +498,148 @@ func removePartialOutput(path string) error {
 	return lastErr
 }
 
+func (s *Service) stagingPath(taskID string, fileIndex int, finalPath string) (string, error) {
+	if strings.TrimSpace(taskID) == "" {
+		return "", errors.New("missing task id")
+	}
+	ext := filepath.Ext(finalPath)
+	if ext == "" {
+		ext = ".mkv"
+	}
+	name := fmt.Sprintf("%03d-%s%s", fileIndex+1, randomID(), ext)
+	return filepath.Join(s.cacheDir, "transcode-staging", taskID, name), nil
+}
+
+func (s *Service) publishStagedOutput(taskID, stagePath, finalPath string) error {
+	log.Printf("Publishing staged output %s -> %s", redactPathForLog(stagePath), redactPathForLog(finalPath))
+	if err := validateMediaFile(stagePath); err != nil {
+		log.Printf("Staged media validation failed for %s: %s", redactPathForLog(stagePath), sanitizeLogText(err.Error(), stagePath))
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(finalPath), 0o755); err != nil {
+		return err
+	}
+	tempPath := publishTempPath(finalPath)
+	s.setPartial(taskID, tempPath)
+	if err := copyFile(stagePath, tempPath); err != nil {
+		_ = removePartialOutput(tempPath)
+		return fmt.Errorf("发布到目标目录失败: %w", err)
+	}
+	if err := verifyMatchingMD5(stagePath, tempPath); err != nil {
+		_ = removePartialOutput(tempPath)
+		log.Printf("MD5 verification failed for %s -> %s: %s", redactPathForLog(stagePath), redactPathForLog(tempPath), sanitizeLogText(err.Error(), stagePath, tempPath))
+		return fmt.Errorf("远端写入校验失败: %w", err)
+	}
+	backupPath, err := replaceFile(tempPath, finalPath)
+	if err != nil {
+		_ = removePartialOutput(tempPath)
+		return fmt.Errorf("发布到最终文件失败: %w", err)
+	}
+	s.setPartial(taskID, stagePath)
+	if err := verifyMatchingMD5(stagePath, finalPath); err != nil {
+		rollbackPublishedFile(finalPath, backupPath)
+		log.Printf("Final MD5 verification failed for %s -> %s: %s", redactPathForLog(stagePath), redactPathForLog(finalPath), sanitizeLogText(err.Error(), stagePath, finalPath))
+		return fmt.Errorf("远端最终文件校验失败: %w", err)
+	}
+	if err := validateMediaFile(finalPath); err != nil {
+		rollbackPublishedFile(finalPath, backupPath)
+		log.Printf("Final media validation failed for %s: %s", redactPathForLog(finalPath), sanitizeLogText(err.Error(), finalPath))
+		return err
+	}
+	removeBackupFile(backupPath)
+	s.setPartial(taskID, stagePath)
+	return nil
+}
+
+func replaceFile(src, dst string) (string, error) {
+	if _, statErr := os.Stat(dst); statErr != nil {
+		if !errors.Is(statErr, os.ErrNotExist) {
+			return "", statErr
+		}
+		return "", os.Rename(src, dst)
+	}
+	backup := dst + ".fft-backup-" + randomID()
+	if err := os.Rename(dst, backup); err != nil {
+		return "", err
+	}
+	if err := os.Rename(src, dst); err != nil {
+		_ = os.Rename(backup, dst)
+		return "", err
+	}
+	return backup, nil
+}
+
+func rollbackPublishedFile(finalPath, backupPath string) {
+	_ = removePartialOutput(finalPath)
+	if backupPath != "" {
+		_ = os.Rename(backupPath, finalPath)
+	}
+}
+
+func removeBackupFile(path string) {
+	if path != "" {
+		_ = removePartialOutput(path)
+	}
+}
+
+func publishTempPath(finalPath string) string {
+	return filepath.Join(filepath.Dir(finalPath), "."+filepath.Base(finalPath)+".fft-part-"+randomID())
+}
+
+func verifyMatchingMD5(left, right string) error {
+	leftSum, err := fileMD5(left)
+	if err != nil {
+		return err
+	}
+	rightSum, err := fileMD5(right)
+	if err != nil {
+		return err
+	}
+	if leftSum != rightSum {
+		return fmt.Errorf("MD5 mismatch: %s != %s", leftSum, rightSum)
+	}
+	return nil
+}
+
+func fileMD5(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	hash := md5.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func validateMediaFile(path string) error {
+	if st, err := os.Stat(path); err != nil {
+		return fmt.Errorf("输出文件无法读取: %w", err)
+	} else if st.IsDir() || st.Size() <= 0 {
+		return errors.New("输出文件为空或不是有效文件")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_type", "-of", "default=noprint_wrappers=1:nokey=1", path)
+	out, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("输出文件媒体校验失败: %w", err)
+	}
+	if !strings.Contains(strings.ToLower(string(out)), "video") {
+		return errors.New("输出文件媒体校验失败: 未找到视频流")
+	}
+	return nil
+}
+
 func (s *Service) fail(taskID, message string) {
+	cancelled := false
 	s.update(taskID, func(t *models.TaskInfo) {
+		if t.Status == models.TaskCancelled {
+			cancelled = true
+			return
+		}
 		t.Status = models.TaskFailed
 		t.Message = message
 		t.Progress = 100
@@ -465,6 +648,9 @@ func (s *Service) fail(taskID, message string) {
 		t.ETA = "失败"
 		t.ETASeconds = 0
 	})
+	if cancelled {
+		return
+	}
 	s.mu.Lock()
 	delete(s.lastPersist, taskID)
 	s.mu.Unlock()
@@ -626,13 +812,14 @@ func buildOutputPath(src string, req models.TranscodeRequest, preserveSourceCont
 	base := strings.TrimSuffix(src, filepath.Ext(src))
 	srcExt := filepath.Ext(src)
 	ext := srcExt
+	keepFilename := req.KeepFilename || preserveSourceContainer
 	if !preserveSourceContainer && req.OutputExt != "auto" && req.OutputExt != "" {
 		ext = req.OutputExt
 	}
 	changed := false
 	originalExt := ext
-	autoMP4 := req.AutoMP4 == nil || *req.AutoMP4
-	if !preserveSourceContainer && autoMP4 && incompatibleAV1Exts[strings.ToLower(ext)] {
+	autoMP4 := !preserveSourceContainer && (req.AutoMP4 == nil || *req.AutoMP4)
+	if autoMP4 && incompatibleAV1Exts[strings.ToLower(ext)] {
 		ext = ".mp4"
 		changed = true
 	}
@@ -642,7 +829,7 @@ func buildOutputPath(src string, req models.TranscodeRequest, preserveSourceCont
 	dir := req.OutputDir
 	prefix := req.Prefix
 	suffix := req.Suffix
-	if preserveSourceContainer {
+	if keepFilename {
 		prefix = ""
 		suffix = ""
 	}
@@ -660,11 +847,19 @@ func buildOutputPath(src string, req models.TranscodeRequest, preserveSourceCont
 			prefix = value
 		}
 	}
+	if keepFilename {
+		prefix = ""
+		suffix = ""
+	}
 
 	outDir := filepath.Dir(src)
 	switch dest {
 	case "subfolder":
-		outDir = filepath.Join(filepath.Dir(src), "AV1")
+		folder, err := outputFolderName(req.OutputFolder)
+		if err != nil {
+			return "", false, originalExt, err
+		}
+		outDir = filepath.Join(filepath.Dir(src), folder)
 	case "custom":
 		if dir != "" {
 			outDir = dir
@@ -675,6 +870,17 @@ func buildOutputPath(src string, req models.TranscodeRequest, preserveSourceCont
 		ext = ".mkv"
 	}
 	return filepath.Join(outDir, prefix+filepath.Base(base)+suffix+ext), changed, originalExt, nil
+}
+
+func outputFolderName(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "AV1", nil
+	}
+	if value == "." || value == ".." || filepath.IsAbs(value) || strings.ContainsAny(value, `/\`) || filepath.Base(value) != value {
+		return "", errors.New("invalid output folder name")
+	}
+	return value, nil
 }
 
 func shouldCopyAV1(src string, req models.TranscodeRequest) bool {
@@ -699,6 +905,10 @@ func isAV1Codec(codec string) bool {
 }
 
 func copyFile(src, dst string) error {
+	return copyFileWithSync(src, dst, (*os.File).Sync)
+}
+
+func copyFileWithSync(src, dst string, syncFn func(*os.File) error) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
@@ -715,6 +925,13 @@ func copyFile(src, dst string) error {
 		_ = os.Remove(dst)
 		return err
 	}
+	if err := syncFn(out); err != nil {
+		if !isUnsupportedFileSyncError(err) {
+			_ = os.Remove(dst)
+			return err
+		}
+		log.Printf("File sync is unsupported for %s; continuing with post-copy verification", redactPathForLog(dst))
+	}
 	if err := out.Close(); err != nil {
 		_ = os.Remove(dst)
 		return err
@@ -723,6 +940,12 @@ func copyFile(src, dst string) error {
 		_ = os.Chmod(dst, info.Mode())
 	}
 	return nil
+}
+
+func isUnsupportedFileSyncError(err error) bool {
+	return errors.Is(err, syscall.ENOTSUP) ||
+		errors.Is(err, syscall.EOPNOTSUPP) ||
+		errors.Is(err, syscall.ENOSYS)
 }
 
 func buildFFmpegArgs(src, dst string, req models.TranscodeRequest) []string {

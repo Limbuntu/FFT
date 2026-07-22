@@ -77,7 +77,7 @@ func New(cfg config.Config, db *fftdb.DB) *Server {
 		db:           db,
 		hub:          hub,
 		hardware:     detector,
-		transcoder:   transcode.New(hub, db),
+		transcoder:   transcode.New(hub, db, cfg.CacheDir),
 		watchFolders: watchfolders.New(db),
 		presets:      presets.New(db),
 	}
@@ -412,7 +412,7 @@ func (s *Server) manageWatchFolder(c *gin.Context) {
 	taskOutputs := transcodeTaskOutputs(tasks, record.Path)
 	naming := managedOutputNamingFromQuery(c)
 	items := make([]models.ManagedFileItem, 0, len(files))
-	targetRoot := targetRootFor(record)
+	targetRoot := targetRootFor(record, naming)
 	var sourceSize, targetSize int64
 	for _, file := range files {
 		sourceSize += file.Size
@@ -910,7 +910,10 @@ func relativePath(root, path string) string {
 	return rel
 }
 
-func targetRootFor(folder fftdb.WatchFolderRecord) string {
+func targetRootFor(folder fftdb.WatchFolderRecord, naming managedOutputNaming) string {
+	if naming.OutputFolder != "" {
+		return filepath.Join(folder.Path, naming.OutputFolder)
+	}
 	switch folder.OutputDest {
 	case "subfolder":
 		return filepath.Join(folder.Path, "AV1")
@@ -931,6 +934,8 @@ type managedOutputNaming struct {
 	SuffixEnabled bool
 	OutputExt     string
 	AutoMP4       bool
+	OutputFolder  string
+	KeepFilename  bool
 }
 
 func managedOutputNamingFromQuery(c *gin.Context) managedOutputNaming {
@@ -956,11 +961,31 @@ func managedOutputNamingFromQuery(c *gin.Context) managedOutputNaming {
 	if c.Query("auto_mp4") == "false" {
 		naming.AutoMP4 = false
 	}
+	if outputFolder := managedOutputFolderName(c.Query("output_folder")); outputFolder != "" {
+		naming.OutputFolder = outputFolder
+	}
+	if c.Query("keep_filename") == "true" {
+		naming.KeepFilename = true
+		naming.Prefix = ""
+		naming.PrefixEnabled = false
+		naming.Suffix = ""
+		naming.SuffixEnabled = false
+		naming.OutputExt = "auto"
+		naming.AutoMP4 = true
+	}
 	return naming
 }
 
+func managedOutputFolderName(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "." || value == ".." || filepath.IsAbs(value) || strings.ContainsAny(value, `/\`) || filepath.Base(value) != value {
+		return ""
+	}
+	return value
+}
+
 func targetPathFor(folder fftdb.WatchFolderRecord, sourcePath string, preserveSourceContainer bool, naming managedOutputNaming) string {
-	if folder.OutputDest == "" {
+	if folder.OutputDest == "" && naming.OutputFolder == "" {
 		return ""
 	}
 	sourceDir := filepath.Dir(sourcePath)
@@ -970,6 +995,7 @@ func targetPathFor(folder fftdb.WatchFolderRecord, sourcePath string, preserveSo
 		relDir = ""
 	}
 	ext := filepath.Ext(sourcePath)
+	keepFilename := preserveSourceContainer || naming.KeepFilename
 	if !preserveSourceContainer && naming.OutputExt != "" && naming.OutputExt != "auto" {
 		ext = naming.OutputExt
 	}
@@ -980,14 +1006,17 @@ func targetPathFor(folder fftdb.WatchFolderRecord, sourcePath string, preserveSo
 		ext = ".mkv"
 	}
 	prefix := ""
-	if !preserveSourceContainer && naming.PrefixEnabled {
+	if !keepFilename && naming.PrefixEnabled {
 		prefix = naming.Prefix
 	}
 	suffix := ""
-	if !preserveSourceContainer && naming.SuffixEnabled {
+	if !keepFilename && naming.SuffixEnabled {
 		suffix = naming.Suffix
 	}
 	name := prefix + sourceBase + suffix + ext
+	if naming.OutputFolder != "" {
+		return filepath.Join(folder.Path, naming.OutputFolder, relDir, sourceBase+ext)
+	}
 	switch folder.OutputDest {
 	case "subfolder":
 		if !preserveSourceContainer {
@@ -1158,7 +1187,7 @@ func managedSummary(folder fftdb.WatchFolderRecord, tasks []models.TaskInfo, fil
 			created = task.CreatedAt
 		}
 		if task.Status == models.TaskRunning || task.Status == models.TaskPending {
-			if task.Progress > summary.Progress {
+			if summary.ActiveTaskID == "" || task.Progress > summary.Progress {
 				summary.Progress = task.Progress
 				summary.ActiveTaskID = task.TaskID
 			}

@@ -75,6 +75,8 @@ func (d *DB) Migrate() error {
 			preset TEXT NOT NULL,
 			extra_args TEXT NOT NULL DEFAULT '[]',
 			output_ext TEXT NOT NULL DEFAULT 'auto',
+			output_folder TEXT NOT NULL DEFAULT '',
+			keep_filename INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);`,
@@ -117,6 +119,12 @@ func (d *DB) Migrate() error {
 		return err
 	}
 	if err := d.ensureColumn("watch_folders", "preset_name", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := d.ensureColumn("presets", "output_folder", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := d.ensureColumn("presets", "keep_filename", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	return nil
@@ -274,7 +282,7 @@ func (d *DB) RemoveWatchFolder(path string) (bool, error) {
 }
 
 func (d *DB) CustomPresets() ([]models.Preset, error) {
-	rows, err := d.db.Query(`SELECT name, encoder, crf, preset, extra_args, output_ext FROM presets ORDER BY name`)
+	rows, err := d.db.Query(`SELECT name, encoder, crf, preset, extra_args, output_ext, output_folder, keep_filename FROM presets ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -284,7 +292,7 @@ func (d *DB) CustomPresets() ([]models.Preset, error) {
 	for rows.Next() {
 		var p models.Preset
 		var extra string
-		if err := rows.Scan(&p.Name, &p.Encoder, &p.CRF, &p.Preset, &extra, &p.OutputExt); err != nil {
+		if err := rows.Scan(&p.Name, &p.Encoder, &p.CRF, &p.Preset, &extra, &p.OutputExt, &p.OutputFolder, &p.KeepFilename); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(extra), &p.ExtraArgs)
@@ -306,16 +314,18 @@ func (d *DB) SavePreset(p models.Preset) (models.Preset, error) {
 	}
 	now := time.Now().Format(time.RFC3339Nano)
 	_, err = d.db.Exec(
-		`INSERT INTO presets(name, encoder, crf, preset, extra_args, output_ext, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO presets(name, encoder, crf, preset, extra_args, output_ext, output_folder, keep_filename, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(name) DO UPDATE SET
 		 encoder = excluded.encoder,
 		 crf = excluded.crf,
 		 preset = excluded.preset,
 		 extra_args = excluded.extra_args,
 		 output_ext = excluded.output_ext,
+		 output_folder = excluded.output_folder,
+		 keep_filename = excluded.keep_filename,
 		 updated_at = excluded.updated_at`,
-		p.Name, p.Encoder, p.CRF, p.Preset.String(), string(extra), p.OutputExt, now, now,
+		p.Name, p.Encoder, p.CRF, p.Preset.String(), string(extra), p.OutputExt, p.OutputFolder, p.KeepFilename, now, now,
 	)
 	if err != nil {
 		return models.Preset{}, err

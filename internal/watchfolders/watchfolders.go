@@ -80,7 +80,8 @@ func ScanFolder(path string) []models.FileEntry {
 		if entry.IsDir() {
 			return nil
 		}
-		if !IsVideoFile(p) || isTranscodedOutput(p) {
+		relativePath, relErr := filepath.Rel(path, p)
+		if !IsVideoFile(p) || relErr != nil || isTranscodedOutput(relativePath) {
 			return nil
 		}
 		info, err := entry.Info()
@@ -103,7 +104,7 @@ func ScanFolder(path string) []models.FileEntry {
 
 func isTranscodedOutput(path string) bool {
 	for _, part := range strings.Split(filepath.Clean(path), string(filepath.Separator)) {
-		if part == "av1" || part == "AV1" {
+		if strings.EqualFold(part, "av1") || strings.EqualFold(part, "proxy") {
 			return true
 		}
 	}

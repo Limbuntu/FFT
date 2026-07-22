@@ -11,6 +11,7 @@ import (
 
 var Builtins = []models.Preset{
 	{Name: "极速", Encoder: "libsvtav1", CRF: 35, Preset: "12", ExtraArgs: []string{}, Builtin: true, OutputExt: "auto"},
+	{Name: "Proxy", Encoder: "libsvtav1", CRF: 30, Preset: "9", ExtraArgs: []string{"-pix_fmt", "yuv420p"}, Builtin: true, OutputExt: "auto", KeepFilename: true},
 	{Name: "均衡", Encoder: "libsvtav1", CRF: 28, Preset: "8", ExtraArgs: []string{}, Builtin: true, OutputExt: "auto"},
 	{Name: "高质量", Encoder: "libsvtav1", CRF: 23, Preset: "4", ExtraArgs: []string{}, Builtin: true, OutputExt: "auto"},
 	{Name: "视觉无损", Encoder: "libsvtav1", CRF: 22, Preset: "6", ExtraArgs: []string{"-pix_fmt", "yuv420p10le", "-svtav1-params", "tune=0:enable-overlays=1"}, Builtin: true, OutputExt: ".mkv"},
@@ -44,6 +45,8 @@ func (s *Service) All() ([]models.Preset, error) {
 	for _, builtin := range Builtins {
 		builtinNames[builtin.Name] = true
 		if override, ok := customByName[builtin.Name]; ok {
+			override.OutputFolder = builtin.OutputFolder
+			override.KeepFilename = builtin.KeepFilename
 			override.Builtin = true
 			result = append(result, override)
 		} else {
@@ -82,7 +85,21 @@ func (s *Service) Save(p models.Preset) (models.Preset, error) {
 		p.OutputExt = "auto"
 	}
 	p = normalizePreset(p)
-	return s.db.SavePreset(p)
+	builtinPreset := false
+	for _, builtin := range Builtins {
+		if builtin.Name == p.Name {
+			p.OutputFolder = builtin.OutputFolder
+			p.KeepFilename = builtin.KeepFilename
+			builtinPreset = true
+			break
+		}
+	}
+	saved, err := s.db.SavePreset(p)
+	if err != nil {
+		return models.Preset{}, err
+	}
+	saved.Builtin = builtinPreset
+	return saved, nil
 }
 
 func (s *Service) Delete(name string) (bool, error) {

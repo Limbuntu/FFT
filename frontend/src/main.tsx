@@ -143,6 +143,8 @@ type TranscodeForm = {
   encoder: string;
   crf: number;
   preset: number | string;
+  output_folder: string;
+  keep_filename: boolean;
   prefix: string;
   prefix_enabled: boolean;
   suffix: string;
@@ -160,6 +162,8 @@ type TaskRequest = {
   extra_args?: string[];
   output_dir?: string;
   output_dest?: string;
+  output_folder?: string;
+  keep_filename?: boolean;
   prefix?: string;
   prefix_enabled?: boolean;
   suffix?: string;
@@ -226,6 +230,8 @@ type Preset = {
   extra_args: string[];
   builtin: boolean;
   output_ext: string;
+  output_folder?: string;
+  keep_filename?: boolean;
 };
 
 type SystemInfo = {
@@ -269,7 +275,7 @@ type OnlineJob = {
 };
 
 const emptyBrowser: FileBrowser = { current: '/', parent: null, entries: [] };
-const defaultForm: TranscodeForm = { encoder: 'libsvtav1', crf: 28, preset: 8, prefix: '', prefix_enabled: false, suffix: '_av1', suffix_enabled: true, output_ext: 'auto', auto_mp4: true, extra_args: [] };
+const defaultForm: TranscodeForm = { encoder: 'libsvtav1', crf: 28, preset: 8, output_folder: '', keep_filename: false, prefix: '', prefix_enabled: false, suffix: '_av1', suffix_enabled: true, output_ext: 'auto', auto_mp4: true, extra_args: [] };
 const feedbackURL = 'https://feedback-prod-d4gl0lj03892e606a-1251838363.tcloudbaseapp.com/feedback.html';
 const incompatibleAV1OutputExts = new Set(['.mov', '.avi', '.wmv', '.flv', '.ts', '.mpg', '.mpeg']);
 const qsvPresetLabels = ['veryslow', 'slower', 'slow', 'medium', 'fast', 'faster', 'veryfast', 'ultrafast'];
@@ -314,6 +320,8 @@ function App() {
   const outputFolderRef = useRef<string>('');
   const replacingFolderRef = useRef<string>('');
   const knownFilePaths = useRef<Set<string>>(new Set());
+  const managedRequestSeq = useRef(0);
+  const managedDataCache = useRef<Map<string, ManagedFolderResponse>>(new Map());
 
   const [hardware, setHardware] = useState<HardwareReport>({ encoders: [], ffmpeg_version: '' });
   const [hwLoading, setHwLoading] = useState(false);
@@ -365,6 +373,13 @@ function App() {
   const managedFilteredItems = useMemo(
     () => managedItems.filter((item) => item.status === 'running' || managedActions.includes(item.status)),
     [managedActions, managedItems],
+  );
+  const managedTaskStatusKey = useMemo(
+    () => tasks
+      .filter((task) => taskTouchesFolder(task, managedFolderPath))
+      .map((task) => `${task.task_id}:${task.status}`)
+      .join('|'),
+    [managedFolderPath, tasks],
   );
 
   useEffect(() => {
@@ -440,28 +455,37 @@ function App() {
   }, [showToast]);
 
   const loadManagedFolder = useCallback(async (path: string) => {
+    const requestSeq = ++managedRequestSeq.current;
     if (!path) {
       setManagedData(null);
+      setManagedLoading(false);
       return;
     }
     setManagedLoading(true);
     try {
+      const watchedFolder = watchFolders.find((wf) => wf.folder.path === path)?.folder;
+      const request = transcodeRequestForFolder(watchedFolder, availablePresets, form);
       const params = new URLSearchParams({
-        prefix: form.prefix_enabled === true ? form.prefix || '' : '',
-        prefix_enabled: String(form.prefix_enabled === true),
-        suffix: form.suffix_enabled !== false ? form.suffix || '_av1' : '',
-        suffix_enabled: String(form.suffix_enabled !== false),
-        output_ext: form.output_ext || 'auto',
-        auto_mp4: String(form.auto_mp4 !== false),
+        prefix: request.prefix_enabled === true ? request.prefix || '' : '',
+        prefix_enabled: String(request.prefix_enabled === true),
+        suffix: request.suffix_enabled !== false ? request.suffix || '_av1' : '',
+        suffix_enabled: String(request.suffix_enabled !== false),
+        output_ext: request.output_ext || 'auto',
+        auto_mp4: String(request.auto_mp4 !== false),
+        output_folder: request.output_folder || '',
+        keep_filename: String(request.keep_filename === true),
       });
-      setManagedData(await apiGet<ManagedFolderResponse>(`/api/watchfolders/${pathToB64(path)}/manage?${params.toString()}`));
+      const next = await apiGet<ManagedFolderResponse>(`/api/watchfolders/${pathToB64(path)}/manage?${params.toString()}`);
+      if (requestSeq !== managedRequestSeq.current) return;
+      managedDataCache.current.set(path, next);
+      setManagedData(next);
       setManagedOverrides({});
     } catch (error) {
-      showToast(errorMessage(error), 'error');
+      if (requestSeq === managedRequestSeq.current) showToast(errorMessage(error), 'error');
     } finally {
-      setManagedLoading(false);
+      if (requestSeq === managedRequestSeq.current) setManagedLoading(false);
     }
-  }, [form.auto_mp4, form.output_ext, form.prefix, form.prefix_enabled, form.suffix, form.suffix_enabled, showToast]);
+  }, [availablePresets, form, showToast, watchFolders]);
 
   const loadPresets = useCallback(async () => {
     try {
@@ -518,7 +542,7 @@ function App() {
 
   useEffect(() => {
     if (tab === 'files') void loadManagedFolder(managedFolderPath);
-  }, [loadManagedFolder, managedFolderPath, tab, tasks]);
+  }, [loadManagedFolder, managedFolderPath, managedTaskStatusKey, tab]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -620,6 +644,8 @@ function App() {
   function outputFolderBrowseStart(path: string) {
     const wf = watchFolders.find((item) => item.folder.path === path);
     if (!wf) return path || '/';
+    const presetOutputFolder = transcodeRequestForFolder(wf.folder, availablePresets, form).output_folder?.trim();
+    if (presetOutputFolder) return joinPath(wf.folder.path, presetOutputFolder);
     const outputDest = normalizedOutputDest(wf.folder);
     if (outputDest === 'custom' && wf.folder.output_dir) return wf.folder.output_dir;
     if (outputDest === 'subfolder') return joinPath(wf.folder.path, 'AV1');
@@ -710,15 +736,29 @@ function App() {
 
   function buildFileOutputs(files: string[]) {
     const map: Record<string, { output_dest: string; output_dir: string; prefix?: string; suffix?: string; copy_av1?: string }> = {};
-    const basePrefix = form.prefix_enabled === true ? form.prefix || '' : '';
-    const baseSuffix = form.suffix_enabled !== false ? form.suffix || '_av1' : '';
     for (const file of files) {
       const wf = watchFolderForFile(file);
       if (wf) {
+        const request = transcodeRequestForFolder(wf.folder, availablePresets, form);
+        const basePrefix = request.prefix_enabled === true ? request.prefix || '' : '';
+        const baseSuffix = request.suffix_enabled !== false ? request.suffix || '_av1' : '';
         const outputDest = normalizedOutputDest(wf.folder);
-        if (!outputDest) continue;
+        const outputFolder = request.output_folder?.trim() || '';
+        if (!outputDest && !outputFolder) continue;
         const isAV1Source = managedData?.items.some((item) => item.source.path === file && isAV1CodecName(item.source.meta?.video_codec));
         const copyAV1 = wf.folder.copy_av1 !== false && isAV1Source;
+        if (outputFolder) {
+          const relativeDir = pathDir(relativePath(wf.folder.path, file));
+          const proxyRoot = joinPath(wf.folder.path, outputFolder);
+          map[file] = {
+            output_dest: 'custom',
+            output_dir: relativeDir ? joinPath(proxyRoot, relativeDir) : proxyRoot,
+            prefix: '',
+            suffix: '',
+            copy_av1: wf.folder.copy_av1 !== false ? 'true' : 'false',
+          };
+          continue;
+        }
         const suffix = copyAV1
           ? ''
           : outputDest === 'subfolder' || outputDest === 'custom'
@@ -740,7 +780,9 @@ function App() {
     const skipped = files.filter((file) => {
       const wf = watchFolderForFile(file);
       const outputDest = wf ? normalizedOutputDest(wf.folder) : '';
-      return wf && (!outputDest || (outputDest === 'custom' && !wf.folder.output_dir));
+      const request = transcodeRequestForFolder(wf?.folder, availablePresets, form);
+      const hasPresetOutput = Boolean(request.output_folder?.trim());
+      return wf && !hasPresetOutput && (!outputDest || (outputDest === 'custom' && !wf.folder.output_dir));
     });
     const runnableFiles = files.filter((file) => !skipped.includes(file));
     if (skipped.length) {
@@ -754,8 +796,8 @@ function App() {
     for (const group of groups) {
       await apiSend('/api/transcode', {
         ...group.request,
-        auto_mp4: form.auto_mp4 !== false,
-        suffix_enabled: form.suffix_enabled !== false,
+        auto_mp4: group.request.auto_mp4 !== false,
+        suffix_enabled: group.request.suffix_enabled !== false,
         files: group.files,
         file_outputs: buildFileOutputs(group.files),
       });
@@ -1008,8 +1050,8 @@ function App() {
                 onPresetChange={(name) => {
                   setSelectedPreset(name);
                   const preset = availablePresets.find((item) => item.name === name);
-                  if (preset) setForm((old) => ({ ...old, ...presetToFormPatch(preset, old.output_ext) }));
-                  else setForm((old) => ({ ...old, extra_args: [] }));
+                  if (preset) setForm((old) => applyPresetToForm(old, preset));
+                  else setForm((old) => clearPresetWorkflow(old));
                 }}
                 onUpload={(files) => void uploadOnlineFiles(files)}
                 onDeleteJob={(job) => void deleteOnlineJob(job)}
@@ -1034,8 +1076,11 @@ function App() {
                 items={managedItems}
                 filteredItems={managedFilteredItems}
                 onSelectFolder={(path) => {
+                  if (path === managedFolderPath) return;
+                  managedRequestSeq.current += 1;
+                  setManagedData(managedDataCache.current.get(path) || null);
+                  setManagedOverrides({});
                   setManagedFolderPath(path);
-                  void loadManagedFolder(path);
                 }}
                 onUpdateFolder={(path, patch) => updateFolder(path, patch)}
                 onBrowseOutputFolder={openOutputFolderBrowser}
@@ -1055,8 +1100,8 @@ function App() {
                   const task = tasks.find((item) => item.request?.files?.some((file) => pathBelongsToFolder(file, managedFolderPath)) && item.status === 'done');
                   void downloadTaskReport(task?.task_id);
                 }}
-                onCancel={() => {
-                  if (managedData?.summary.active_task_id) void apiSend(`/api/transcode/${managedData.summary.active_task_id}`, undefined, 'DELETE').then(refreshTasks);
+                onCancel={(taskID) => {
+                  if (taskID) void cancelTranscodeTask(taskID);
                 }}
                 autoTranscode={autoTranscode}
                 onAutoTranscodeChange={setAutoTranscode}
@@ -1074,7 +1119,7 @@ function App() {
                         <select value={form.encoder} onChange={(event) => {
                           const encoder = event.target.value;
                           setSelectedPreset('');
-                          setForm((old) => ({ ...old, encoder, preset: encoder === 'av1_qsv' ? Math.min(Number(old.preset) || 4, 7) : old.preset, extra_args: [] }));
+                          setForm((old) => clearPresetWorkflow({ ...old, encoder, preset: encoder === 'av1_qsv' ? Math.min(Number(old.preset) || 4, 7) : old.preset, extra_args: [] }));
                         }}>
                           {availableEncoders.map((encoder) => <option key={encoder.name} value={encoder.name}>{encoder.label}</option>)}
                         </select>
@@ -1085,8 +1130,8 @@ function App() {
                           const name = event.target.value;
                           setSelectedPreset(name);
                           const preset = availablePresets.find((item) => item.name === name);
-                          if (preset) setForm((old) => ({ ...old, ...presetToFormPatch(preset, old.output_ext) }));
-                          else setForm((old) => ({ ...old, extra_args: [] }));
+                          if (preset) setForm((old) => applyPresetToForm(old, preset));
+                          else setForm((old) => clearPresetWorkflow(old));
                         }}>
                           <option value="">自定义</option>
                           {availablePresets.map((preset) => <option key={preset.name} value={preset.name}>{preset.name}</option>)}
@@ -1574,10 +1619,11 @@ function WatchFoldersPanel({
       </div>
       <div className="watch-folder-list">
         {watchFolders.map((wf) => {
-          const outputPath = outputFolderPath(wf.folder);
+          const presetOutputFolder = transcodeRequestForFolder(wf.folder, presets, globalForm).output_folder?.trim() || '';
+          const outputPath = effectiveOutputFolderPath(wf.folder, presets, globalForm);
           const outputDest = normalizedOutputDest(wf.folder);
-          const needsCustomOutput = outputDest === 'custom' && !wf.folder.output_dir;
-          const outputUnset = !outputDest;
+          const needsCustomOutput = !presetOutputFolder && outputDest === 'custom' && !wf.folder.output_dir;
+          const outputUnset = !presetOutputFolder && !outputDest;
           const taskName = wf.folder.label || folderName(wf.folder.path);
           const folderFiles = wf.files.map((file) => file.path);
           const activeTask = tasks.find((task) => isActiveTranscodeTask(task) && taskTouchesFolder(task, wf.folder.path));
@@ -1707,8 +1753,10 @@ function WatchFolderSettingsModal({
   onAutoTranscodeChange: React.Dispatch<React.SetStateAction<boolean>>;
 }) {
   const [activeTab, setActiveTab] = useState<'output' | 'preset' | 'action' | 'advanced'>('output');
-  const outputPath = outputFolderPath(wf.folder);
+  const presetOutputFolder = transcodeRequestForFolder(wf.folder, presets, globalForm).output_folder?.trim() || '';
+  const outputPath = effectiveOutputFolderPath(wf.folder, presets, globalForm);
   const outputDest = normalizedOutputDest(wf.folder);
+  const outputReady = Boolean(presetOutputFolder || (outputDest && (outputDest !== 'custom' || wf.folder.output_dir)));
   const selectedPreset = presets.find((preset) => preset.name === wf.folder.preset_name) ?? null;
   const presetLabel = folderPresetLabel(wf.folder, presets, globalForm);
   const folderFiles = wf.files.map((file) => file.path);
@@ -1806,12 +1854,12 @@ function WatchFolderSettingsModal({
               <div className="watch-settings-summary">
                 <span>待处理文件</span>
                 <strong>{wf.files.length} 个</strong>
-                <small>{!outputDest ? '请先设置输出方式' : formatSize(wf.folder.total_size)}</small>
+                <small>{!outputReady ? '请先设置输出方式' : formatSize(wf.folder.total_size)}</small>
               </div>
               {activeTask ? (
                 <button className="btn danger" onClick={() => onCancelTask(activeTask.task_id)}><Square size={16} />取消转码</button>
               ) : (
-                <button className="btn primary" disabled={!folderFiles.length || !outputDest || (outputDest === 'custom' && !wf.folder.output_dir)} onClick={() => onStartFolderTranscode(folderFiles)}><Play size={16} />开始转码</button>
+                <button className="btn primary" disabled={!folderFiles.length || !outputReady} onClick={() => onStartFolderTranscode(folderFiles)}><Play size={16} />开始转码</button>
               )}
             </div>
           )}
@@ -1887,6 +1935,18 @@ function outputFolderPath(folder: WatchFolder) {
     };
   }
   return { label: folder.label || folderName(folder.path), path: folder.path, detail: '输出到源文件所在目录' };
+}
+
+function effectiveOutputFolderPath(folder: WatchFolder, presets: Preset[], globalForm: TranscodeForm) {
+  const outputFolder = transcodeRequestForFolder(folder, presets, globalForm).output_folder?.trim();
+  if (outputFolder) {
+    return {
+      label: `${outputFolder} 子目录`,
+      path: joinPath(folder.path, outputFolder),
+      detail: `由当前预设输出到 ${outputFolder}/，保留原主文件名`,
+    };
+  }
+  return outputFolderPath(folder);
 }
 
 function normalizedOutputDest(folder: WatchFolder) {
@@ -2100,7 +2160,7 @@ function FileManagerPage({
   onToggleAllItems: (status: ManagedStatus) => void;
   onRunSelected: () => void;
   onReport: () => void;
-  onCancel: () => void;
+  onCancel: (taskID?: string) => void;
   autoTranscode: boolean;
   onAutoTranscodeChange: React.Dispatch<React.SetStateAction<boolean>>;
 }) {
@@ -2115,7 +2175,14 @@ function FileManagerPage({
   }, [items]);
   const toggleableItems = useMemo(() => items.filter((item) => item.status !== 'running'), [items]);
   const allToggleableAdded = toggleableItems.length > 0 && toggleableItems.every((item) => item.status === 'add');
-  const progress = clampPercent(data?.summary.progress || 0);
+  const activeFolderTask = useMemo(
+    () => tasks.find((task) => isActiveTranscodeTask(task) && taskTouchesFolder(task, selectedPath)) ?? null,
+    [selectedPath, tasks],
+  );
+  const activeTaskID = activeFolderTask?.task_id || data?.summary.active_task_id || '';
+  const progress = activeFolderTask
+    ? taskOverallProgressPercent(activeFolderTask)
+    : clampPercent(data?.summary.progress || 0);
   const progressLabel = formatProgressPercent(progress);
   const currentPresetLabel = useMemo(
     () => selectedWatchFolder
@@ -2219,7 +2286,7 @@ function FileManagerPage({
               </button>
               <button className="icon-btn" title="更多设置" disabled={!selectedWatchFolder} onClick={() => setSettingsOpen(true)}><MoreHorizontal size={18} /></button>
               <button className="icon-btn file-manager-refresh" title={loading ? '正在刷新' : '刷新'} disabled={loading} onClick={onRefresh}><RefreshCw size={16} /></button>
-              <button className="btn" disabled={!data?.summary.active_task_id} onClick={onCancel}><Square size={15} />取消</button>
+              <button className="btn" disabled={!activeTaskID} onClick={() => onCancel(activeTaskID)}><Square size={15} />取消</button>
             </div>
           </div>
         </div>
@@ -2260,10 +2327,10 @@ function FileManagerPage({
           onUpdateFolder={refreshAfterFolderUpdate}
           onBrowseOutputFolder={onBrowseOutputFolder}
           onStartFolderTranscode={onStartFolderTranscode}
-          onCancelTask={() => onCancel()}
+          onCancelTask={(taskID) => onCancel(taskID)}
           presets={presets}
           globalForm={globalForm}
-          activeTask={tasks.find((task) => isActiveTranscodeTask(task) && taskTouchesFolder(task, selectedWatchFolder.folder.path)) ?? null}
+          activeTask={activeFolderTask}
           autoTranscode={autoTranscode}
           onAutoTranscodeChange={onAutoTranscodeChange}
         />
@@ -3221,7 +3288,7 @@ function relativePath(root: string, file: string) {
 }
 
 function fileBelongsToWatchFolder(file: string, wf: WatchFolderResult) {
-  return wf.files.some((entry) => entry.path === file);
+  return wf.files.some((entry) => entry.path === file) || pathBelongsToFolder(file, wf.folder.path);
 }
 
 function pathBelongsToFolder(path: string, folder: string) {
@@ -3322,20 +3389,56 @@ function globalPresetNameForForm(presets: Preset[], form: TranscodeForm) {
 
 function transcodeRequestForFolder(folder: WatchFolder | undefined, presets: Preset[], globalForm: TranscodeForm): TaskRequest {
   const preset = folder?.preset_name ? presets.find((item) => item.name === folder.preset_name) : null;
-  if (!preset) return normalizedTranscodeForm(globalForm);
+  const normalizedGlobal = normalizedTranscodeForm(globalForm);
+  const outputDest = folder ? normalizedOutputDest(folder) : '';
+  if (!preset) {
+    if (normalizedGlobal.keep_filename && outputDest === 'beside') {
+      return {
+        ...normalizedGlobal,
+        output_folder: '',
+        keep_filename: false,
+        prefix: defaultForm.prefix,
+        prefix_enabled: defaultForm.prefix_enabled,
+        suffix: defaultForm.suffix,
+        suffix_enabled: defaultForm.suffix_enabled,
+        output_ext: defaultForm.output_ext,
+        auto_mp4: defaultForm.auto_mp4,
+      };
+    }
+    return {
+      ...normalizedGlobal,
+      output_dest: normalizedGlobal.output_folder ? 'subfolder' : undefined,
+    };
+  }
+  const keepFilename = preset.keep_filename === true && outputDest !== 'beside';
+  const resetProxyNaming = (normalizedGlobal.keep_filename && !keepFilename)
+    || (preset.keep_filename === true && outputDest === 'beside');
+  const naming = resetProxyNaming
+    ? {
+      prefix: defaultForm.prefix,
+      prefix_enabled: defaultForm.prefix_enabled,
+      suffix: defaultForm.suffix,
+      suffix_enabled: defaultForm.suffix_enabled,
+      output_ext: defaultForm.output_ext,
+      auto_mp4: defaultForm.auto_mp4,
+    }
+    : normalizedGlobal;
   return {
     encoder: preset.encoder,
     crf: preset.crf,
     preset: normalizedPresetValue(preset.encoder, preset.preset),
-    output_ext: globalForm.output_ext || 'auto',
-    auto_mp4: globalForm.auto_mp4 !== false,
-    suffix: globalForm.suffix,
-    suffix_enabled: globalForm.suffix_enabled,
-	    extra_args: preset.extra_args || [],
-	    prefix: globalForm.prefix,
-	    prefix_enabled: globalForm.prefix_enabled,
-	  };
-	}
+    output_dest: preset.output_folder ? 'subfolder' : undefined,
+    output_folder: preset.output_folder || '',
+    keep_filename: keepFilename,
+    output_ext: keepFilename ? 'auto' : naming.output_ext || 'auto',
+    auto_mp4: keepFilename ? true : naming.auto_mp4 !== false,
+    suffix: keepFilename ? '' : naming.suffix,
+    suffix_enabled: keepFilename ? false : naming.suffix_enabled,
+    extra_args: preset.extra_args || [],
+    prefix: keepFilename ? '' : naming.prefix,
+    prefix_enabled: keepFilename ? false : naming.prefix_enabled,
+  };
+}
 
 function previewManagedTarget(item: ManagedFileItem, folder: WatchFolder | undefined, presets: Preset[], globalForm: TranscodeForm): ManagedFileSide {
   if (!folder || item.target.exists || item.status === 'running') return item.target;
@@ -3351,11 +3454,13 @@ function previewManagedTarget(item: ManagedFileItem, folder: WatchFolder | undef
 }
 
 function previewOutputPath(sourcePath: string, folder: WatchFolder, presets: Preset[], globalForm: TranscodeForm, isAV1Source: boolean) {
-  const outputDest = normalizedOutputDest(folder);
-  if (!outputDest) return '';
-
   const request = transcodeRequestForFolder(folder, presets, globalForm);
+  const outputDest = normalizedOutputDest(folder);
+  const outputFolder = request.output_folder?.trim() || '';
+  if (!outputDest && !outputFolder) return '';
+
   const copyAV1 = folder.copy_av1 !== false && isAV1Source;
+  const keepFilename = request.keep_filename === true;
   const sourceExt = pathExt(sourcePath);
   let ext = sourceExt;
   if (!copyAV1 && request.output_ext && request.output_ext !== 'auto') {
@@ -3366,19 +3471,24 @@ function previewOutputPath(sourcePath: string, folder: WatchFolder, presets: Pre
   }
   if (!ext) ext = '.mkv';
 
-  const prefix = copyAV1 || request.prefix_enabled === false ? '' : request.prefix || '';
-  const baseSuffix = copyAV1 || request.suffix_enabled === false ? '' : request.suffix || '_av1';
+  const prefix = copyAV1 || keepFilename || request.prefix_enabled === false ? '' : request.prefix || '';
+  const baseSuffix = copyAV1 || keepFilename || request.suffix_enabled === false ? '' : request.suffix || '_av1';
   const suffix = copyAV1
     ? ''
     : outputDest === 'subfolder' || outputDest === 'custom'
       ? flattenedOutputSuffix(folder.path, sourcePath, baseSuffix)
       : baseSuffix;
   const stem = pathStem(sourcePath);
-  const outputDir = outputDest === 'subfolder'
-    ? joinPath(folder.path, 'AV1')
-    : outputDest === 'custom'
-      ? folder.output_dir
-      : pathDir(sourcePath);
+  const relativeDir = pathDir(relativePath(folder.path, sourcePath));
+  let outputDir = pathDir(sourcePath);
+  if (outputFolder) {
+    const outputRoot = joinPath(folder.path, outputFolder);
+    outputDir = relativeDir ? joinPath(outputRoot, relativeDir) : outputRoot;
+  } else if (outputDest === 'subfolder') {
+    outputDir = joinPath(folder.path, 'AV1');
+  } else if (outputDest === 'custom') {
+    outputDir = folder.output_dir;
+  }
   if (!outputDir) return '';
   return joinPath(outputDir, `${prefix}${stem}${suffix}${ext}`);
 }
@@ -3393,6 +3503,8 @@ function groupFilesByTranscodeSettings(files: string[], watchFolders: WatchFolde
       crf: request.crf,
       preset: request.preset,
       output_ext: request.output_ext,
+      output_folder: request.output_folder || '',
+      keep_filename: request.keep_filename === true,
       auto_mp4: request.auto_mp4 !== false,
       extra_args: request.extra_args || [],
     });
@@ -3488,6 +3600,8 @@ function normalizedTranscodeForm(form: TranscodeForm): TranscodeForm {
   return {
     ...defaultForm,
     ...form,
+    output_folder: form.output_folder ?? '',
+    keep_filename: form.keep_filename === true,
     prefix: form.prefix ?? '',
     prefix_enabled: form.prefix_enabled === true,
     suffix: form.suffix ?? defaultForm.suffix,
@@ -3498,13 +3612,52 @@ function normalizedTranscodeForm(form: TranscodeForm): TranscodeForm {
   };
 }
 
-function presetToFormPatch(preset: Preset, fallbackOutputExt: string): Partial<TranscodeForm> {
+function applyPresetToForm(form: TranscodeForm, preset: Preset): TranscodeForm {
+  const keepFilename = preset.keep_filename === true;
+  const base = form.keep_filename && !keepFilename
+    ? {
+      ...form,
+      prefix: defaultForm.prefix,
+      prefix_enabled: defaultForm.prefix_enabled,
+      suffix: defaultForm.suffix,
+      suffix_enabled: defaultForm.suffix_enabled,
+      output_ext: defaultForm.output_ext,
+      auto_mp4: defaultForm.auto_mp4,
+    }
+    : form;
   return {
+    ...base,
     encoder: preset.encoder,
     crf: preset.crf,
     preset: normalizedPresetValue(preset.encoder, preset.preset),
-    output_ext: fallbackOutputExt || 'auto',
+    output_folder: preset.output_folder || '',
+    keep_filename: keepFilename,
     extra_args: preset.extra_args || [],
+    ...(keepFilename ? {
+      prefix: '',
+      prefix_enabled: false,
+      suffix: '',
+      suffix_enabled: false,
+      output_ext: 'auto',
+      auto_mp4: true,
+    } : {}),
+  };
+}
+
+function clearPresetWorkflow(form: TranscodeForm): TranscodeForm {
+  return {
+    ...form,
+    extra_args: [],
+    output_folder: '',
+    keep_filename: false,
+    ...(form.keep_filename ? {
+      prefix: defaultForm.prefix,
+      prefix_enabled: defaultForm.prefix_enabled,
+      suffix: defaultForm.suffix,
+      suffix_enabled: defaultForm.suffix_enabled,
+      output_ext: defaultForm.output_ext,
+      auto_mp4: defaultForm.auto_mp4,
+    } : {}),
   };
 }
 
@@ -3514,7 +3667,10 @@ function clamp(value: number, minValue: number, maxValue: number) {
 
 function presetSummaryLine(preset: Preset) {
   const extraCount = preset.extra_args?.length || 0;
-  return `${preset.encoder} · ${encoderKindLabel(preset.encoder)} · CRF ${preset.crf} · Preset ${presetDisplayValue(preset.encoder, preset.preset)} · ${preset.output_ext || 'auto'}${extraCount ? ` · 额外参数 ${extraCount} 项` : ''}`;
+  const output = preset.output_folder
+    ? ` · 输出 ${preset.output_folder}/${preset.keep_filename ? '原主文件名' : ''}`
+    : '';
+  return `${preset.encoder} · ${encoderKindLabel(preset.encoder)} · CRF ${preset.crf} · Preset ${presetDisplayValue(preset.encoder, preset.preset)} · ${preset.output_ext || 'auto'}${output}${extraCount ? ` · 额外参数 ${extraCount} 项` : ''}`;
 }
 
 function presetCmd(p: Preset) {

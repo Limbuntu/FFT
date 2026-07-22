@@ -76,6 +76,8 @@ type TranscodeRequest struct {
 	ExtraArgs     []string                     `json:"extra_args"`
 	OutputDir     string                       `json:"output_dir"`
 	OutputDest    string                       `json:"output_dest"`
+	OutputFolder  string                       `json:"output_folder"`
+	KeepFilename  bool                         `json:"keep_filename"`
 	Prefix        string                       `json:"prefix"`
 	PrefixEnabled *bool                        `json:"prefix_enabled"`
 	Suffix        string                       `json:"suffix"`
@@ -92,13 +94,15 @@ func (r *TranscodeRequest) Normalize() {
 	if r.Preset == "" {
 		r.Preset = "8"
 	}
-	if r.OutputDest == "" {
+	if r.OutputDest == "" && strings.TrimSpace(r.OutputFolder) != "" {
+		r.OutputDest = "subfolder"
+	} else if r.OutputDest == "" {
 		r.OutputDest = "beside"
 	}
-	if r.PrefixEnabled == nil || !*r.PrefixEnabled {
+	if r.KeepFilename || r.PrefixEnabled == nil || !*r.PrefixEnabled {
 		r.Prefix = ""
 	}
-	if r.SuffixEnabled != nil && !*r.SuffixEnabled {
+	if r.KeepFilename || (r.SuffixEnabled != nil && !*r.SuffixEnabled) {
 		r.Suffix = ""
 	} else if r.Suffix == "" {
 		r.Suffix = "_av1"
@@ -190,13 +194,15 @@ type BenchmarkResult struct {
 }
 
 type Preset struct {
-	Name      string      `json:"name"`
-	Encoder   string      `json:"encoder"`
-	CRF       int         `json:"crf"`
-	Preset    PresetValue `json:"preset"`
-	ExtraArgs []string    `json:"extra_args"`
-	Builtin   bool        `json:"builtin"`
-	OutputExt string      `json:"output_ext"`
+	Name         string      `json:"name"`
+	Encoder      string      `json:"encoder"`
+	CRF          int         `json:"crf"`
+	Preset       PresetValue `json:"preset"`
+	ExtraArgs    []string    `json:"extra_args"`
+	Builtin      bool        `json:"builtin"`
+	OutputExt    string      `json:"output_ext"`
+	OutputFolder string      `json:"output_folder,omitempty"`
+	KeepFilename bool        `json:"keep_filename,omitempty"`
 }
 
 type FileEntry struct {

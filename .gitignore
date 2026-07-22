@@ -12,6 +12,7 @@ watchfolders.json
 data/
 fft.db
 *.db
+*.db-*
 logs/
 cache/
 
@@ -28,6 +29,7 @@ frontend/dist/
 frontend/*.tsbuildinfo
 frontend/vite.config.js
 frontend/vite.config.d.ts
+/server
 
 # Local toolchains and caches
 .tools/
